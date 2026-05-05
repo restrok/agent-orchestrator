@@ -100,6 +100,8 @@ def supervisor_node(state: AgentState):
     system_prompt_content = (
         f"You are a versatile AI Orchestrator. Your role is to coordinate between the user and specialized Expert Agents. "
         f"Analyze the user's intent, call the appropriate tools, and synthesize results into a clear, friendly response.\n\n"
+        "LANGUAGE POLICY:\n"
+        "Always respond in the same language the user is speaking. If the user asks in English, respond in English. If the user asks in Spanish, respond in Spanish. This is mandatory.\n\n"
         "IMPORTANT FORMATTING RULES for Telegram (Chat Interface):\n"
         "1. DO NOT use Markdown tables. Use bulleted lists instead.\n"
         "2. VERTICAL SPACING: Use double newlines (two '\\n') between list items and between different sections to ensure good readability on mobile screens.\n"
