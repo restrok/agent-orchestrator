@@ -17,7 +17,7 @@ The **Agent Orchestrator** acts as the central brain of a multi-agent ecosystem.
 
 | Supervisor Reasoning | Biometric Expert Insights | Mobile-Friendly Formatting |
 | :---: | :---: | :---: |
-| ![Orchestrator Reasoning](assets/orchestrator-main.png) | ![Biometric Expert](assets/biometric-expert.png) | ![Telegram Formatting](assets/mobile-format.png) |
+| ![Orchestrator Reasoning](assets/orchestrator-logs.png) | ![Biometric Expert](assets/coach-agent-logs.png) | ![Telegram Formatting](assets/bot-reply.png) |
 
 ## 🏗️ Architecture
 
