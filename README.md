@@ -13,6 +13,12 @@ The **Agent Orchestrator** acts as the central brain of a multi-agent ecosystem.
 - **Expert-Agnostic:** The orchestrator is designed to be neutral, focusing on platform formatting (Telegram) and routing logic.
 - **Secure A2A Routing:** Uses `X-User-ID` injection to ensure data privacy across expert agents.
 
+## 📸 Screenshots
+
+| Supervisor Reasoning | Biometric Expert Insights | Mobile-Friendly Formatting |
+| :---: | :---: | :---: |
+| ![Orchestrator Reasoning](assets/orchestrator-main.png) | ![Biometric Expert](assets/biometric-expert.png) | ![Telegram Formatting](assets/mobile-format.png) |
+
 ## 🏗️ Architecture
 
 1.  **Telegram Gateway:** A lightweight proxy that handles user authentication, multimodal intake (text/voice), and renders responses with Telegram-optimized formatting.
