@@ -1,0 +1,24 @@
+# EXAMPLE DOCKER COMPOSE TEMPLATE
+# For production use in a custom network (e.g., homelab), 
+# copy and adapt this to your infrastructure.
+
+version: '3.8'
+
+services:
+  orchestrator:
+    build: ./orchestrator-api
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./orchestrator-api/.env
+    volumes:
+      - ./orchestrator-api/app:/app
+
+  gateway:
+    build: ./telegram-gateway
+    env_file:
+      - ./telegram-gateway/.env
+    volumes:
+      - ./telegram-gateway:/app
+    depends_on:
+      - orchestrator
