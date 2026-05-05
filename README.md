@@ -15,9 +15,21 @@ The **Agent Orchestrator** acts as the central brain of a multi-agent ecosystem.
 
 ## 📸 Screenshots
 
-| Supervisor Reasoning | Biometric Expert Insights | Mobile-Friendly Formatting |
-| :---: | :---: | :---: |
-| ![Orchestrator Reasoning](assets/orchestrator-logs.png) | ![Biometric Expert](assets/coach-agent-logs.png) | ![Telegram Formatting](assets/bot-reply.png) |
+### 🧠 Supervisor Reasoning
+The Orchestrator analyzes user intent and decides which expert to call.
+![Orchestrator Reasoning](assets/orchestrator-logs.png)
+
+---
+
+### 🩺 Biometric Expert Insights
+Detailed analysis from specialized agents based on user data.
+![Biometric Expert](assets/coach-agent-logs.png)
+
+---
+
+### 📱 Mobile-Friendly Formatting
+Clean, readable responses optimized for the Telegram interface.
+![Telegram Formatting](assets/bot-reply.png)
 
 ## 🏗️ Architecture
 
