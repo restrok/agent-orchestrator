@@ -1,24 +1,30 @@
-# EXAMPLE DOCKER COMPOSE TEMPLATE
-# For production use in a custom network (e.g., homelab), 
-# copy and adapt this to your infrastructure.
-
 version: '3.8'
 
 services:
   orchestrator:
-    build: ./orchestrator-api
+    build:
+      context: ./orchestrator-api
+      dockerfile: Dockerfile
+    image: ghcr.io/restrok/agent-orchestrator/orchestrator-api:latest
+    container_name: agent-orchestrator-api
     ports:
       - "8001:8001"
     env_file:
       - ./orchestrator-api/.env
     volumes:
       - ./orchestrator-api/app:/app
+    restart: unless-stopped
 
   gateway:
-    build: ./telegram-gateway
+    build:
+      context: ./telegram-gateway
+      dockerfile: Dockerfile
+    image: ghcr.io/restrok/agent-orchestrator/telegram-gateway:latest
+    container_name: agent-orchestrator-gateway
     env_file:
       - ./telegram-gateway/.env
-    volumes:
-      - ./telegram-gateway:/app
     depends_on:
       - orchestrator
+    environment:
+      - API_URL=http://orchestrator:8001
+    restart: unless-stopped
