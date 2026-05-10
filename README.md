@@ -8,9 +8,11 @@ The **Agent Orchestrator** acts as the central brain of a multi-agent ecosystem.
 
 ### Key Features
 - **Hub-and-Spoke Architecture:** Centralized reasoning with decentralized expertise.
+- **Proactive Notifications:** Support for asynchronous, agent-initiated alerts pushed via the Orchestrator to Telegram.
 - **Stateful Orchestration:** Powered by LangGraph for complex, multi-turn tool calling and persistence.
 - **SSE Streaming:** Real-time response delivery to the Telegram Gateway for a smooth UX.
 - **Expert-Agnostic:** The orchestrator is designed to be neutral, focusing on platform formatting (Telegram) and routing logic.
+- **Multi-Architecture Docker:** Optimized images for `amd64` and `arm64` (Raspberry Pi).
 - **Secure A2A Routing:** Uses `X-User-ID` injection to ensure data privacy across expert agents.
 
 ## 📸 Screenshots
@@ -35,13 +37,15 @@ Clean, readable responses optimized for the Telegram interface.
 
 1.  **Telegram Gateway:** A lightweight proxy that handles user authentication, multimodal intake (text/voice), and renders responses with Telegram-optimized formatting.
 2.  **Orchestrator API:** The core service that runs the LangGraph supervisor. It manages conversation state, tool calling, and synthesizes expert data into human-friendly responses.
-3.  **Expert Agents (External):** Specialized microservices that provide specific data or perform actions. The orchestrator treats these as "black boxes" via a standardized API.
+3.  **Proactive Hook:** A specialized endpoint (`POST /api/notify`) that allows external expert agents to push high-signal alerts directly to users without a prior request.
+4.  **Expert Agents (External):** Specialized microservices that provide specific data or perform actions. The orchestrator treats these as "black boxes" via a standardized API.
 
 ## 🛠️ Tech Stack
 - **Language:** Python 3.10+
 - **Orchestration:** [LangGraph](https://github.com/langchain-ai/langgraph)
 - **LLM:** Google Gemma 4 (via LangChain Google GenAI)
 - **API Framework:** FastAPI
+- **CI/CD:** GitHub Actions (Multi-arch Docker builds)
 - **Interface:** [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot)
 - **Streaming:** Server-Sent Events (SSE)
 
@@ -52,7 +56,13 @@ Clean, readable responses optimized for the Telegram interface.
 - A Google AI (Gemini/Gemma) API Key.
 - A Telegram Bot Token (from @BotFather).
 
-### Installation
+### Installation (Docker - Recommended)
+
+```bash
+docker-compose up -d
+```
+
+### Installation (Local)
 
 1. **Clone the repository:**
    ```bash

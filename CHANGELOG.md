@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-05-10
+
+### Added
+- **Proactive Notification Infrastructure:** Implemented a new `POST /api/notify` endpoint in the Orchestrator API, allowing external agents to push alerts to Telegram users.
+- **CI/CD Pipeline:** Added GitHub Actions workflow for automated linting, formatting checks, and multi-architecture Docker image builds (amd64/arm64).
+- **Docker-Compose Production Example:** Updated the root `docker-compose.yml` with a production-ready configuration including internal networking and image references.
+- **User Mapping Utility:** The Orchestrator now correctly loads and inverses user mappings from `config.json` to route proactive alerts by platform ID.
+
+### Changed
+- **Code Organization:** Reordered initialization logic in `main.py` to ensure logging is available during configuration loading.
+- **Dependency Management:** Integrated `httpx` for outbound communication with Telegram and Expert Agents.
+
 ## [1.1.0] - 2026-05-05
 
 ### Added
