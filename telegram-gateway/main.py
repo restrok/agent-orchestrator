@@ -6,7 +6,6 @@ import asyncio
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.helpers import escape_markdown
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
 # Load environment variables
@@ -115,7 +114,7 @@ async def process_request(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             else:
                 await thinking_message.edit_text("The agent returned an empty response.")
 
-    except Exception as e:
+    except Exception:
         logging.exception("Error during API request")
         await thinking_message.edit_text("An error occurred while processing your request.")
 
