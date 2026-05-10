@@ -12,7 +12,8 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, InjectedState
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import tool
 import httpx
 
@@ -65,11 +66,11 @@ async def call_biometric_expert(
     thread_id: Annotated[str, InjectedState("thread_id")]
 ):
     """Calls the Biometric Expert Agent to get health, Garmin, or profile data."""
-    logger.info(f"--- TOOL CALL: Biometric Expert ---")
+    logger.info("--- TOOL CALL: Biometric Expert ---")
     logger.info(f"User: {user_id}")
     logger.info(f"Thread: {thread_id}")
     logger.info(f"Query sent to Expert: {query}")
-    logger.info(f"------------------------------------")
+    logger.info("------------------------------------")
     
     logger.info(f"Routing request for user {user_id} (thread: {thread_id}) to Biometric Expert")
     async with httpx.AsyncClient() as client:
@@ -96,8 +97,6 @@ async def call_biometric_expert(
 tools = [call_biometric_expert]
 tool_node = ToolNode(tools)
 
-from langgraph.checkpoint.memory import MemorySaver
-
 # --- LangGraph Setup ---
 
 class AgentState(BaseModel):
@@ -114,8 +113,8 @@ def supervisor_node(state: AgentState):
     
     # Add system context with formatting instructions
     system_prompt_content = (
-        f"You are a versatile AI Orchestrator. Your role is to coordinate between the user and specialized Expert Agents. "
-        f"Analyze the user's intent, call the appropriate tools, and synthesize results into a clear, friendly response.\n\n"
+        "You are a versatile AI Orchestrator. Your role is to coordinate between the user and specialized Expert Agents. "
+        "Analyze the user's intent, call the appropriate tools, and synthesize results into a clear, friendly response.\n\n"
         "LANGUAGE POLICY:\n"
         "Always respond in the same language the user is speaking. If the user asks in English, respond in English. If the user asks in Spanish, respond in Spanish. This is mandatory.\n\n"
         "IMPORTANT FORMATTING RULES for Telegram (Chat Interface):\n"
