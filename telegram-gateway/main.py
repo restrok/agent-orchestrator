@@ -54,7 +54,7 @@ async def process_request(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     chat_id = update.message.chat_id
     
     # Send initial "thinking" message
-    thinking_message = await update.message.reply_text("_Thinking..._", parse_mode=ParseMode.MARKDOWN_V2)
+    thinking_message = await update.message.reply_text(r"_Thinking\.\.\._", parse_mode=ParseMode.MARKDOWN_V2)
 
     try:
         async with httpx.AsyncClient() as client:

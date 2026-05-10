@@ -18,13 +18,6 @@ import httpx
 
 load_dotenv()
 
-# Configuration
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-BIOMETRIC_API_URL = os.getenv("BIOMETRIC_API_URL", "http://localhost:8080/chat")
-
-genai.configure(api_key=GOOGLE_API_KEY)
-model_name = "gemma-4-31b-it"
-
 # Logging
 LOG_FILE = "orchestrator.log"
 logging.basicConfig(
@@ -36,6 +29,29 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+# Configuration
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+BIOMETRIC_API_URL = os.getenv("BIOMETRIC_API_URL", "http://localhost:8080/chat")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+# Load user mapping
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+try:
+    with open(CONFIG_PATH, "r") as f:
+        config = json.load(f)
+        # We need to map platform_user_id -> telegram_user_id (chat_id)
+        users = config.get("users", {})
+        # Inverse mapping: { "fsirio": "963420066" }
+        PLATFORM_TO_TELEGRAM = {v: k for k, v in users.items()}
+        logger.info(f"Loaded {len(PLATFORM_TO_TELEGRAM)} user mappings")
+except Exception as e:
+    logger.error(f"Failed to load user mapping from {CONFIG_PATH}: {e}")
+    PLATFORM_TO_TELEGRAM = {}
+
+genai.configure(api_key=GOOGLE_API_KEY)
+model_name = "gemma-4-31b-it"
 
 
 app = FastAPI(title="Telegram Agent Orchestrator")
@@ -142,6 +158,63 @@ graph = workflow.compile(checkpointer=memory)
 
 # --- Endpoints ---
 
+class HealthCheck(BaseModel):
+    status: str
+
+
+class NotificationPayload(BaseModel):
+    user_id: str
+    agent_id: str
+    message: str
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.post("/api/notify")
+async def notify(payload: NotificationPayload):
+    """
+    Sends a proactive notification to a user via Telegram.
+    """
+    logger.info(f"Notification request for user: {payload.user_id} from agent: {payload.agent_id}")
+    
+    chat_id = PLATFORM_TO_TELEGRAM.get(payload.user_id)
+    if not chat_id:
+        logger.error(f"User {payload.user_id} not found in mapping")
+        return {"status": "error", "message": f"User {payload.user_id} not found"}
+
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN not configured")
+        return {"status": "error", "message": "Telegram token not configured"}
+
+    telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    
+    # Format message for Telegram
+    formatted_message = f"🔔 *Notification from {payload.agent_id}*\n\n{payload.message}"
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                telegram_url,
+                json={
+                    "chat_id": chat_id,
+                    "text": formatted_message,
+                    "parse_mode": "Markdown"
+                }
+            )
+            if response.status_code == 200:
+                logger.info(f"Notification sent successfully to {payload.user_id}")
+                return {"status": "success"}
+            else:
+                logger.error(f"Failed to send Telegram message: {response.text}")
+                return {"status": "error", "message": response.text}
+        except Exception as e:
+            logger.exception(f"Exception while sending notification: {e}")
+            return {"status": "error", "message": str(e)}
+
+
 @app.post("/stream")
 async def chat_stream(
     request: Request,
@@ -162,8 +235,9 @@ async def chat_stream(
         
         try:
             uploaded_file = genai.upload_file(path=temp_file_path, mime_type=file.content_type)
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content([
+            # Use gemini-1.5-flash for transcription as it supports audio input
+            transcription_model = genai.GenerativeModel("gemini-1.5-flash")
+            response = transcription_model.generate_content([
                 "Transcribe this voice note and explain the user's intent. "
                 "Output ONLY the transcribed text if it's a simple message, "
                 "or a clear command if it's an action.",
