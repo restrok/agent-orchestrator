@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 from typing import List, Optional, Annotated
 from fastapi import FastAPI, Request, Header, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
@@ -174,6 +175,104 @@ class NotificationPayload(BaseModel):
     message: str
 
 
+class MessageProcessor:
+    @staticmethod
+    def decode(text: str) -> str:
+        """
+        Formats AI response for Telegram MarkdownV2.
+        Converts tables to lists and ensures vertical spacing.
+        """
+        if not text:
+            return ""
+
+        # Handle literal \n if they come as strings
+        text = text.replace("\\n", "\n")
+
+        # 1. Table-to-List Transformation (Robust Version)
+        lines = text.split('\n')
+        processed_lines = []
+        in_table = False
+        
+        # Mapping for biometric emojis
+        emojis = {
+            "distance": "📍", "distancia": "📍",
+            "hr": "❤️", "bpm": "❤️", "frecuencia": "❤️",
+            "pace": "⏱️", "ritmo": "⏱️",
+            "power": "⚡", "potencia": "⚡",
+            "time": "🕒", "tiempo": "🕒", "duración": "🕒",
+            "calories": "🔥", "calorías": "🔥",
+            "vo2": "📈", "sleep": "😴", "sueño": "😴",
+            "hrv": "⚖️"
+        }
+
+        for line in lines:
+            stripped = line.strip()
+            # Detect table line
+            if stripped.startswith('|') and stripped.endswith('|'):
+                # Split and clean parts
+                parts = [p.strip() for p in stripped.split('|') if p.strip()]
+                
+                # Skip separators like |:---|
+                if not parts or all(re.match(r'[:\-]+', p) for p in parts):
+                    continue
+                
+                if not in_table:
+                    # First real line is the header, we skip it but mark we are in a table
+                    in_table = True
+                    processed_lines.append("") # Initial air
+                    continue
+                
+                if len(parts) >= 2:
+                    metric_name = parts[0]
+                    value = " | ".join(parts[1:])
+                    
+                    # Find emoji
+                    icon = ""
+                    for e_key, emoji in emojis.items():
+                        if e_key in metric_name.lower():
+                            icon = emoji + " "
+                            break
+                    
+                    processed_lines.append(f"{icon}**{metric_name}:** {value}")
+                else:
+                    processed_lines.append(f"• {parts[0]}")
+            else:
+                if in_table:
+                    in_table = False
+                    processed_lines.append("") # End of table air
+                processed_lines.append(line)
+        
+        text = '\n'.join(processed_lines)
+
+        # 2. Aggressive Spacing for Sections
+        # Markers that need a double newline before them (Structural)
+        # We exclude friendly emojis like 😊 to keep them inline
+        structural_markers = [r'###', r'🔹', r'⚠️', r'✅', r'📅', r'🔔', r'🏃', r'🔋', r'💪', r'🧘‍♂️']
+        for marker in structural_markers:
+            # Only inject if preceded by a character that isn't a newline or space
+            text = re.sub(r'([^\n\s])\s*(%s)' % marker, r'\1\n\n\2', text)
+
+        # 3. MarkdownV2 Escaping
+        reserved = r"\_*[]()~`>#+-=|{}.!"
+        def escape_match(match):
+            return '\\' + match.group(0)
+        
+        text = re.sub(r'([%s])' % re.escape(reserved), escape_match, text)
+
+        # 4. Restoration of intended formatting
+        # Headers: ### -> Bold
+        text = re.sub(r"\\#\\#\\# (.*?)(?:\n|$)", r"*\1*\n", text)
+        # Bold: \*text\* -> *text* (Note: we use single * in V2)
+        text = re.sub(r'\\\*\\\*(.*?)\\\*\\\*', r'*\1*', text)
+        # Italics: \_text\_ -> _text_
+        text = re.sub(r'\\\_(.*?)\\\_', r'_\1_', text)
+
+        # Final Cleanup: Max 2 newlines
+        text = re.sub(r'\n{3,}', '\n\n', text)
+
+        return text.strip()
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -199,10 +298,13 @@ async def notify(payload: NotificationPayload):
 
     telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    # Format message for Telegram
-    formatted_message = (
-        f"🔔 *Notification from {payload.agent_id}*\n\n{payload.message}"
-    )
+    # Use the unified formatter
+    clean_message = MessageProcessor.decode(payload.message)
+    
+    # Escape agent_id separately for the header
+    safe_agent_id = re.sub(r'([\_*\[\]()~`>#+\-=|{}.!])', r'\\\1', payload.agent_id)
+    header = f"🔔 *Notification from {safe_agent_id}*"
+    formatted_message = f"{header}\n\n{clean_message}"
 
     async with httpx.AsyncClient() as client:
         try:
@@ -211,7 +313,7 @@ async def notify(payload: NotificationPayload):
                 json={
                     "chat_id": chat_id,
                     "text": formatted_message,
-                    "parse_mode": "Markdown",
+                    "parse_mode": "MarkdownV2",
                 },
             )
             if response.status_code == 200:
@@ -298,19 +400,19 @@ async def chat_stream(
                 if isinstance(c, dict):
                     if "text" in c:
                         parts.append(c["text"])
-                    # Specifically ignore blocks like {'type': 'thinking', ...}
                 else:
                     parts.append(str(c))
-            final_message = " ".join(parts).strip()
+            final_message = "".join(parts).strip()
         else:
             final_message = str(final_msg_obj.content)
 
-        # Simulate token streaming of the final message
-        for word in final_message.split():
-            yield f"data: {json.dumps({'text': word + ' '})}\n\n"
+        # Simulate token streaming of the final message preserving structure
+        # We split by characters or small chunks to simulate streaming without losing newlines
+        chunk_size = 10
+        for i in range(0, len(final_message), chunk_size):
+            yield f"data: {json.dumps({'text': final_message[i:i+chunk_size]})}\n\n"
 
         yield "data: [DONE]\n\n"
-
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
