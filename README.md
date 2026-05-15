@@ -1,19 +1,19 @@
 # Agent Orchestrator
 
-A modular, scalable **Hub-and-Spoke** agentic system designed to coordinate multiple specialized Expert Agents through a central AI Supervisor. Built with **LangGraph**, **FastAPI**, and **python-telegram-bot**.
+A modular, scalable **Swarm Architecture** agentic system designed to coordinate multiple specialized Expert Agents through decentralized handoffs. Built with **LangGraph**, **FastAPI**, and **python-telegram-bot**.
 
 ## 🚀 Overview
 
-The **Agent Orchestrator** acts as the central brain of a multi-agent ecosystem. Instead of a single monolithic bot, this project implements an **Agent-to-Agent (A2A)** protocol where a high-intelligence Supervisor (Gemma 4) analyzes user intent and delegates tasks to specialized "Expert Agents" (e.g., Health Coach, Finance Expert, Home Automation).
+The **Agent Orchestrator** acts as the high-speed router of a multi-agent ecosystem. Instead of a single monolithic bot or a strictly centralized supervisor, this project implements an **Agent-to-Agent (A2A)** protocol where an Intent Router analyzes user requests and immediately hands them off to specialized "Expert Agents" (e.g., Biometric Coach, Finance Expert).
 
 ### Key Features
-- **Hub-and-Spoke Architecture:** Centralized reasoning with decentralized expertise.
+- **Swarm Architecture:** Decentralized handoffs to specialized expert nodes.
+- **Intent-Based Routing:** Automated delegation based on structured LLM classification.
+- **Loop Prevention:** Robust state management to detect and halt infinite agent cycles.
 - **Proactive Notifications:** Support for asynchronous, agent-initiated alerts pushed via the Orchestrator to Telegram.
-- **Stateful Orchestration:** Powered by LangGraph for complex, multi-turn tool calling and persistence.
-- **SSE Streaming:** Real-time response delivery to the Telegram Gateway for a smooth UX.
-- **Expert-Agnostic:** The orchestrator is designed to be neutral, focusing on platform formatting (Telegram) and routing logic.
-- **Multi-Architecture Docker:** Optimized images for `amd64` and `arm64` (Raspberry Pi).
-- **Secure A2A Routing:** Uses `X-User-ID` injection to ensure data privacy across expert agents.
+- **Stateful Orchestration:** Powered by LangGraph for complex, multi-turn interactions with persistence.
+- **SSE Streaming:** Real-time response delivery to the Telegram Gateway.
+- **Secure A2A Routing:** Uses `X-User-ID` injection for cross-agent data privacy.
 
 ## 📸 Screenshots
 

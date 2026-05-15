@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-05-15
+
+### Added
+- **Swarm Architecture Integration:** Migrated the Orchestrator from a centralized Supervisor model to a decentralized "Swarm" routing topology.
+- **Intent Router Node:** Implemented a new asynchronous `node_router` that uses structured LLM output to classify and delegate requests.
+- **Direct Expert Handoffs:** Added a dedicated `biometric_expert_node` for direct handoffs, bypassing the supervisor for specialized biometric queries.
+- **Loop Prevention System:** Integrated a state-based loop counter that automatically halts execution if an agent enters an infinite tool-calling cycle (threshold: 4).
+- **TypedDict State Management:** Refactored `AgentState` to use `TypedDict` and native LangGraph reducers for more robust message history and performance.
+- **Modular Models:** Extracted state and classifier definitions into a dedicated `models.py` for better project modularity.
+
+### Changed
+- **Graph Topology:** Updated the LangGraph flow to START -> Router -> {Expert Node | Supervisor Node}.
+- **Logging Traceability:** Added detailed logs for Intent Classification and Rationale to improve observability during agent reasoning.
+
+### Fixed
+- **State Consistency:** Ensured all nodes use asynchronous execution (A2A) to prevent blocking the main event loop during long-running expert calls.
+
 ## [1.2.0] - 2026-05-10
 
 ### Added

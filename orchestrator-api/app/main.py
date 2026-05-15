@@ -10,13 +10,15 @@ from dotenv import load_dotenv
 
 import google.generativeai as genai
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, InjectedState
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import tool
 import httpx
+
+from models import AgentState, IntentClassifier
 
 load_dotenv()
 
@@ -101,18 +103,80 @@ tool_node = ToolNode(tools)
 # --- LangGraph Setup ---
 
 
-class AgentState(BaseModel):
-    messages: Annotated[List[BaseMessage], add_messages]
-    user_id: str
-    thread_id: str
+async def node_router(state: AgentState):
+    """
+    Classifies the user's intent to route the conversation to the correct expert or handler.
+    """
+    logger.info("--- NODE: Router ---")
+    
+    # Get the last human message for logging
+    last_message = ""
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, HumanMessage):
+            last_message = msg.content
+            break
+    
+    if not last_message:
+        logger.warning("No human message found in state. Defaulting to 'unknown'.")
+        return {"intent": "unknown"}
+
+    logger.info(f"Classifying intent for: {str(last_message)[:100]}...")
+
+    llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=GOOGLE_API_KEY, temperature=0)
+    structured_llm = llm.with_structured_output(IntentClassifier)
+    
+    try:
+        classification = await structured_llm.ainvoke(state["messages"])
+        logger.info(f"🔍 Intent Classified: {classification.intent.upper()}")
+        logger.info(f"💡 Rationale: {classification.rationale}")
+        return {"intent": classification.intent}
+    except Exception as e:
+        logger.error(f"Intent classification failed: {e}. Falling back to 'unknown'.")
+        return {"intent": "unknown"}
+
+
+async def biometric_expert_node(state: AgentState):
+    """
+    Expert node that handles biometric queries by calling the Biometric API directly.
+    """
+    logger.info("--- NODE: Biometric Expert Handoff ---")
+    
+    # Get the last message
+    query = state["messages"][-1].content
+    user_id = state["user_id"]
+    thread_id = state["thread_id"]
+    
+    # Call the tool logic directly
+    result = await call_biometric_expert.ainvoke({
+        "query": query,
+        "user_id": user_id,
+        "thread_id": thread_id
+    })
+    
+    return {"messages": [AIMessage(content=result)]}
+
+
+def route_to_agent(state: AgentState):
+    """
+    Router logic to determine which expert agent to hand off to.
+    """
+    intent = state.get("intent", "unknown")
+    if intent == "biometric_expert":
+        return "biometric_expert"
+    return "supervisor"
 
 
 def supervisor_node(state: AgentState):
-    logger.info(f"Supervisor node called with {len(state.messages)} messages")
-    for i, msg in enumerate(state.messages):
+    current_loops = state.get("loop_count", 0)
+    logger.info(f"--- NODE: Supervisor (Loop: {current_loops}) ---")
+
+    logger.info(f"Supervisor node called with {len(state['messages'])} messages")
+    # Log only the last few messages to keep logs clean
+    for i, msg in enumerate(state["messages"][-3:]):
         logger.info(f"Message {i}: {type(msg).__name__} - {str(msg.content)[:100]}...")
 
     llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=GOOGLE_API_KEY)
+
 
     # Add system context with formatting instructions
     system_prompt_content = (
@@ -129,20 +193,26 @@ def supervisor_node(state: AgentState):
     )
     system_prompt = SystemMessage(content=system_prompt_content)
 
-    messages_to_send = [system_prompt] + state.messages
+    messages_to_send = [system_prompt] + state["messages"]
 
     # Simple supervisor logic
     llm_with_tools = llm.bind_tools(tools)
     try:
         response = llm_with_tools.invoke(messages_to_send)
-        return {"messages": [response]}
+        return {"messages": [response], "loop_count": current_loops + 1}
     except Exception as e:
         logger.error(f"Error invoking LLM: {e}")
         raise e
 
 
 def should_continue(state: AgentState):
-    last_message = state.messages[-1]
+    current_loops = state.get("loop_count", 0)
+    last_message = state["messages"][-1]
+
+    if current_loops > 4:
+        logger.warning(f"⚠️ Loop count ({current_loops}) exceeded. Stopping to preserve API quota.")
+        return END
+
     if last_message.tool_calls:
         return "tools"
     return END
@@ -151,10 +221,25 @@ def should_continue(state: AgentState):
 memory = MemorySaver()
 
 workflow = StateGraph(AgentState)
+workflow.add_node("router", node_router)
+workflow.add_node("biometric_expert", biometric_expert_node)
 workflow.add_node("supervisor", supervisor_node)
 workflow.add_node("tools", tool_node)
 
-workflow.set_entry_point("supervisor")
+workflow.add_edge(START, "router")
+workflow.add_conditional_edges(
+    "router",
+    route_to_agent,
+    {
+        "biometric_expert": "biometric_expert",
+        "supervisor": "supervisor"
+    }
+)
+
+# Expert nodes go to END or can go to supervisor for synthesis
+# For now, let's have them go to END as they are specialized experts
+workflow.add_edge("biometric_expert", END)
+
 workflow.add_conditional_edges(
     "supervisor", should_continue, {"tools": "tools", END: END}
 )
