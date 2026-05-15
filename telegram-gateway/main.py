@@ -125,6 +125,15 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles slash commands by treating them as text requests.
+    """
+    if not update.message or not update.message.text:
+        return
+    
+    await handle_text(update, context)
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -232,7 +241,8 @@ if __name__ == '__main__':
 
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+    # Handle both regular text and commands (like /garmin-login)
+    application.add_handler(MessageHandler(filters.TEXT, handle_text))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     
     print("Telegram Gateway started...")
