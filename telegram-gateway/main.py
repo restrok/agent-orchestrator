@@ -113,11 +113,44 @@ class MessageProcessor:
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_URL = os.getenv("API_URL")
 
-# Load user mapping
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-with open(CONFIG_PATH, "r") as f:
-    config = json.load(f)
-    USER_MAPPING = config.get("users", {})
+# Global user mapping cache
+USER_MAPPING = {}
+
+async def fetch_user_mapping():
+    """Fetches the latest user mapping from the orchestrator."""
+    global USER_MAPPING
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{API_URL}/api/users/mapping", timeout=10.0)
+            if response.status_code == 200:
+                USER_MAPPING = response.json()
+                logging.info(f"Synchronized {len(USER_MAPPING)} user mappings from orchestrator.")
+            else:
+                logging.error(f"Failed to fetch user mapping: {response.status_code}")
+    except Exception as e:
+        logging.error(f"Error fetching user mapping: {e}")
+
+async def register_new_user(telegram_id: str, username: str):
+    """Registers a new user with the orchestrator."""
+    global USER_MAPPING
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{API_URL}/api/users/register",
+                json={"telegram_id": telegram_id, "username": username},
+                timeout=10.0
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success":
+                    platform_id = data.get("platform_user_id")
+                    USER_MAPPING[telegram_id] = platform_id
+                    logging.info(f"Successfully registered new user: {username} ({telegram_id}) -> {platform_id}")
+                    return platform_id
+            logging.error(f"Failed to register user: {response.text}")
+    except Exception as e:
+        logging.error(f"Error registering user: {e}")
+    return None
 
 # Logging setup
 logging.basicConfig(
@@ -155,9 +188,15 @@ async def process_request(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     platform_user_id = USER_MAPPING.get(telegram_user_id)
 
     if not platform_user_id:
-        logging.warning(f"Unauthorized access attempt from Telegram ID: {telegram_user_id}")
-        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
-        return
+        # Silent Registration
+        logging.info(f"New user detected: {telegram_user_id}. Attempting silent registration.")
+        username = update.message.from_user.username or update.message.from_user.first_name or f"user_{telegram_user_id}"
+        platform_user_id = await register_new_user(telegram_user_id, username)
+        
+        if not platform_user_id:
+            logging.error(f"Could not register user {telegram_user_id}")
+            await update.message.reply_text("Sorry, an error occurred during your registration. Please try again later.")
+            return
 
     chat_id = update.message.chat_id
     
@@ -238,6 +277,9 @@ if __name__ == '__main__':
     if not TELEGRAM_BOT_TOKEN or not API_URL:
         print("Error: TELEGRAM_BOT_TOKEN and API_URL must be set in .env")
         exit(1)
+
+    # Initial sync of user mapping
+    asyncio.run(fetch_user_mapping())
 
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     

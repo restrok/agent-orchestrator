@@ -13,7 +13,11 @@ services:
       - ./orchestrator-api/.env
     volumes:
       - ./orchestrator-api/app:/app
+      - orchestrator_data:/app/data
     restart: unless-stopped
+
+volumes:
+  orchestrator_data:
 
   gateway:
     build:

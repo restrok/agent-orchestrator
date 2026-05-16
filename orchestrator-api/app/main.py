@@ -20,6 +20,8 @@ import httpx
 
 from models import AgentState, IntentClassifier
 
+from db import init_db, get_user_mapping, register_user, get_telegram_id
+
 load_dotenv()
 
 # Logging
@@ -37,19 +39,21 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 BIOMETRIC_API_URL = os.getenv("BIOMETRIC_API_URL", "http://localhost:8080/chat")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Load user mapping
+# Initialize Database and migrate if needed
+init_db()
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-try:
-    with open(CONFIG_PATH, "r") as f:
-        config = json.load(f)
-        # We need to map platform_user_id -> telegram_user_id (chat_id)
-        users = config.get("users", {})
-        # Inverse mapping: { "fsirio": "963420066" }
-        PLATFORM_TO_TELEGRAM = {v: k for k, v in users.items()}
-        logger.info(f"Loaded {len(PLATFORM_TO_TELEGRAM)} user mappings")
-except Exception as e:
-    logger.error(f"Failed to load user mapping from {CONFIG_PATH}: {e}")
-    PLATFORM_TO_TELEGRAM = {}
+if os.path.exists(CONFIG_PATH):
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            config = json.load(f)
+            users = config.get("users", {})
+            for tid, pid in users.items():
+                register_user(tid, pid)
+        logger.info(f"Migrated users from {CONFIG_PATH} to SQLite")
+        # Rename to avoid re-migration
+        os.rename(CONFIG_PATH, f"{CONFIG_PATH}.bak")
+    except Exception as e:
+        logger.error(f"Failed to migrate from {CONFIG_PATH}: {e}")
 
 genai.configure(api_key=GOOGLE_API_KEY)
 model_name = "gemma-4-31b-it"
@@ -363,6 +367,47 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/api/users/mapping")
+async def get_mapping():
+    """Returns the current {telegram_id: platform_id} mapping."""
+    return get_user_mapping()
+
+
+class RegisterPayload(BaseModel):
+    telegram_id: str
+    username: str
+
+
+@app.post("/api/users/register")
+async def register(payload: RegisterPayload):
+    """Registers a new user."""
+    # Simple username cleaning
+    platform_id = re.sub(r"\W+", "_", payload.username.lower()).strip("_")
+
+    # Ensure uniqueness (naive approach for now)
+    base_id = platform_id
+    counter = 1
+    while True:
+        # Check if this platform_id already exists for a DIFFERENT telegram_id
+        existing_tid = get_telegram_id(platform_id)
+        if existing_tid and existing_tid != payload.telegram_id:
+            platform_id = f"{base_id}_{counter}"
+            counter += 1
+        else:
+            break
+
+    success = register_user(payload.telegram_id, platform_id)
+    if success:
+        return {"status": "success", "platform_user_id": platform_id}
+    else:
+        # If registration failed but it's the same telegram_id, just return the existing mapping
+        from db import get_platform_id
+        existing_pid = get_platform_id(payload.telegram_id)
+        if existing_pid:
+            return {"status": "success", "platform_user_id": existing_pid}
+        return {"status": "error", "message": "Failed to register user"}
+
+
 @app.post("/api/notify")
 async def notify(payload: NotificationPayload):
     """
@@ -372,9 +417,9 @@ async def notify(payload: NotificationPayload):
         f"Notification request for user: {payload.user_id} from agent: {payload.agent_id}"
     )
 
-    chat_id = PLATFORM_TO_TELEGRAM.get(payload.user_id)
+    chat_id = get_telegram_id(payload.user_id)
     if not chat_id:
-        logger.error(f"User {payload.user_id} not found in mapping")
+        logger.error(f"User {payload.user_id} not found in database")
         return {"status": "error", "message": f"User {payload.user_id} not found"}
 
     if not TELEGRAM_BOT_TOKEN:
