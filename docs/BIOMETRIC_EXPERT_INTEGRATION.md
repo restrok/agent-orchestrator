@@ -20,7 +20,8 @@ Integrate the **Biometric AI Platform** as a specialized "Expert Agent" within t
 - Map intent keywords to this expert: `run`, `training`, `workout`, `sleep`, `HRV`, `heart rate`, `garmin`, `health`, `headache`, `medication`, `10k`.
 
 ### 2. A2A Protocol Implementation (Agent-to-Agent)
-- Configure the Orchestrator to call the `/v1/chat/completions` endpoint of the Biometric Expert API when the Supervisor identifies a relevant intent.
+- Configure the Orchestrator to call the `/v1/chat/completions` endpoint of the Biometric Expert API when the **Intent Router** identifies a relevant intent.
+- **Direct Handoff Node:** Implemented a specialized `biometric_expert_node` for decentralized processing.
 - **Header Injection:** Ensure the user's unique identifier (derived from their Telegram ID) is passed in the `X-User-ID` header to the Expert API.
 - **Streaming Support:** Utilize the SSE (Server-Sent Events) capabilities of the Biometric API to provide real-time feedback to the Telegram Gateway.
 
@@ -32,10 +33,10 @@ Integrate the **Biometric AI Platform** as a specialized "Expert Agent" within t
 - Enable the orchestrator to capture unstructured health reports (e.g., *"My head still hurts, I took an Enantyum"*) and forward them to the Biometric Expert's health logging tool via the universal chat interface.
 
 ## 📝 Success Criteria
-- [ ] Supervisor correctly routes "How was my sleep?" to the Biometric Expert.
-- [ ] User ID is correctly forwarded via `X-User-ID` header.
-- [ ] Response from the Biometric Expert (including tables/markdown) is correctly rendered in the Telegram UI.
-- [ ] SSE Stream works without breaking the Telegram Gateway connection.
+- [x] Intent Router correctly routes "How was my sleep?" to the Biometric Expert.
+- [x] User ID is correctly forwarded via `X-User-ID` header.
+- [x] Response from the Biometric Expert (including tables/markdown) is correctly rendered in the Telegram UI.
+- [x] SSE Stream works without breaking the Telegram Gateway connection.
 
 ---
 **Technical Note:** The Biometric API is running **v0.2.0** with **SDK v0.7.0** and is ready for integration.
