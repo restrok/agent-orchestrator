@@ -1,5 +1,5 @@
-import pytest
 from main import MessageProcessor
+
 
 def test_message_processor_basic_clean():
     """Test basic whitespace cleaning."""

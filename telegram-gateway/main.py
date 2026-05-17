@@ -185,25 +185,35 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await process_request(update, context, voice_bytes=voice_bytes, voice_mime=update.message.voice.mime_type)
 
-async def process_request(update: Update, context: ContextTypes.DEFAULT_TYPE, text=None, voice_bytes=None, voice_mime=None):
+async def process_request(
+    update: Update, _context: ContextTypes.DEFAULT_TYPE, text=None, voice_bytes=None, voice_mime=None
+):
     telegram_user_id = str(update.message.from_user.id)
     platform_user_id = USER_MAPPING.get(telegram_user_id)
 
     if not platform_user_id:
         # Silent Registration
         logging.info(f"New user detected: {telegram_user_id}. Attempting silent registration.")
-        username = update.message.from_user.username or update.message.from_user.first_name or f"user_{telegram_user_id}"
+        username = (
+            update.message.from_user.username
+            or update.message.from_user.first_name
+            or f"user_{telegram_user_id}"
+        )
         platform_user_id = await register_new_user(telegram_user_id, username)
-        
+
         if not platform_user_id:
             logging.error(f"Could not register user {telegram_user_id}")
-            await update.message.reply_text("Sorry, an error occurred during your registration. Please try again later.")
+            await update.message.reply_text(
+                "Sorry, an error occurred during your registration. Please try again later."
+            )
             return
 
     chat_id = update.message.chat_id
     
     # Send initial "thinking" message
-    thinking_message = await update.message.reply_text(r"_Thinking\.\.\._", parse_mode=ParseMode.MARKDOWN_V2)
+    thinking_message = await update.message.reply_text(
+        r"_Thinking\.\.\._", parse_mode=ParseMode.MARKDOWN_V2
+    )
 
     try:
         async with httpx.AsyncClient() as client:
@@ -228,11 +238,15 @@ async def process_request(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             full_response = ""
             last_update_time = 0
             
-            async with client.stream("POST", stream_url, data=data, files=files, headers=headers, timeout=150.0) as response:
+            async with client.stream(
+                "POST", stream_url, data=data, files=files, headers=headers, timeout=150.0
+            ) as response:
                 if response.status_code != 200:
                     error_text = await response.aread()
                     logging.error(f"API Error: {response.status_code} - {error_text.decode()}")
-                    await thinking_message.edit_text(f"Error communicating with the backend (Status: {response.status_code}).")
+                    await thinking_message.edit_text(
+                        f"Error communicating with the backend (Status: {response.status_code})."
+                    )
                     return
 
                 async for line in response.aiter_lines():
@@ -248,12 +262,13 @@ async def process_request(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                             
                             # Throttle updates to Telegram to avoid rate limits
                             current_time = asyncio.get_event_loop().time()
-                            if current_time - last_update_time > 1.0: # Update every 1s
-                                if full_response.strip():
-                                    # DECODE the partial response to ensure valid MarkdownV2
-                                    formatted_partial = MessageProcessor.decode(full_response)
-                                    await thinking_message.edit_text(formatted_partial + "...", parse_mode=ParseMode.MARKDOWN_V2)
-                                    last_update_time = current_time
+                            if current_time - last_update_time > 1.0 and full_response.strip():
+                                # DECODE the partial response to ensure valid MarkdownV2
+                                formatted_partial = MessageProcessor.decode(full_response)
+                                await thinking_message.edit_text(
+                                    formatted_partial + "...", parse_mode=ParseMode.MARKDOWN_V2
+                                )
+                                last_update_time = current_time
                         except json.JSONDecodeError:
                             continue
                         except Exception as e:

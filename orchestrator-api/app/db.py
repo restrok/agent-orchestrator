@@ -1,12 +1,13 @@
 import logging
-import os
 import sqlite3
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DB_DIR = os.path.join(os.path.dirname(__file__), "data")
-os.makedirs(DB_DIR, exist_ok=True)
-DB_PATH = os.path.join(DB_DIR, "orchestrator.db")
+DB_DIR = Path(__file__).parent / "data"
+DB_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DB_DIR / "orchestrator.db"
+
 
 def init_db():
     """Initializes the SQLite database and creates the users table."""
@@ -22,6 +23,7 @@ def init_db():
     conn.close()
     logger.info(f"Database initialized at {DB_PATH}")
 
+
 def get_user_mapping():
     """Returns the current {telegram_id: platform_user_id} mapping."""
     conn = sqlite3.connect(DB_PATH)
@@ -31,14 +33,14 @@ def get_user_mapping():
     conn.close()
     return mapping
 
+
 def register_user(telegram_id: str, platform_user_id: str):
     """Registers a new user in the database."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "INSERT INTO users (telegram_id, platform_user_id) VALUES (?, ?)",
-            (telegram_id, platform_user_id)
+            "INSERT INTO users (telegram_id, platform_user_id) VALUES (?, ?)", (telegram_id, platform_user_id)
         )
         conn.commit()
         logger.info(f"Registered user: {telegram_id} -> {platform_user_id}")
@@ -49,6 +51,7 @@ def register_user(telegram_id: str, platform_user_id: str):
     finally:
         conn.close()
 
+
 def get_platform_id(telegram_id: str):
     """Retrieves the platform_user_id for a given telegram_id."""
     conn = sqlite3.connect(DB_PATH)
@@ -57,6 +60,7 @@ def get_platform_id(telegram_id: str):
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else None
+
 
 def get_telegram_id(platform_user_id: str):
     """Retrieves the telegram_id for a given platform_user_id."""

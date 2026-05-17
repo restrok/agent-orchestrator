@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Annotated
 
 import google.generativeai as genai
@@ -38,17 +39,17 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # Initialize Database and migrate if needed
 init_db()
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-if os.path.exists(CONFIG_PATH):
+CONFIG_PATH = Path(__file__).parent / "config.json"
+if CONFIG_PATH.exists():
     try:
-        with open(CONFIG_PATH) as f:
+        with CONFIG_PATH.open() as f:
             config = json.load(f)
             users = config.get("users", {})
             for tid, pid in users.items():
                 register_user(tid, pid)
         logger.info(f"Migrated users from {CONFIG_PATH} to SQLite")
         # Rename to avoid re-migration
-        os.rename(CONFIG_PATH, f"{CONFIG_PATH}.bak")
+        CONFIG_PATH.rename(f"{CONFIG_PATH}.bak")
     except Exception as e:
         logger.error(f"Failed to migrate from {CONFIG_PATH}: {e}")
 
@@ -74,9 +75,7 @@ async def call_biometric_expert(
     logger.info(f"Query sent to Expert: {query}")
     logger.info("------------------------------------")
 
-    logger.info(
-        f"Routing request for user {user_id} (thread: {thread_id}) to Biometric Expert"
-    )
+    logger.info(f"Routing request for user {user_id} (thread: {thread_id}) to Biometric Expert")
     async with httpx.AsyncClient() as client:
         # Adjusted for /v1/chat/completions "Black Box" interface
         response = await client.post(
@@ -93,9 +92,7 @@ async def call_biometric_expert(
             except (KeyError, IndexError):
                 return data.get("response", str(data))
         else:
-            return (
-                f"Error from Biometric Expert: {response.status_code} - {response.text}"
-            )
+            return f"Error from Biometric Expert: {response.status_code} - {response.text}"
 
 
 tools = [call_biometric_expert]
@@ -109,14 +106,14 @@ async def node_router(state: AgentState):
     Classifies the user's intent to route the conversation to the correct expert or handler.
     """
     logger.info("--- NODE: Router ---")
-    
+
     # Get the last human message for logging
     last_message = ""
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
             last_message = msg.content
             break
-    
+
     if not last_message:
         logger.warning("No human message found in state. Defaulting to 'unknown'.")
         return {"intent": "unknown"}
@@ -125,7 +122,7 @@ async def node_router(state: AgentState):
 
     llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=GOOGLE_API_KEY, temperature=0)
     structured_llm = llm.with_structured_output(IntentClassifier)
-    
+
     try:
         classification = await structured_llm.ainvoke(state["messages"])
         logger.info(f"🔍 Intent Classified: {classification.intent.upper()}")
@@ -141,19 +138,15 @@ async def biometric_expert_node(state: AgentState):
     Expert node that handles biometric queries by calling the Biometric API directly.
     """
     logger.info("--- NODE: Biometric Expert Handoff ---")
-    
+
     # Get the last message
     query = state["messages"][-1].content
     user_id = state["user_id"]
     thread_id = state["thread_id"]
-    
+
     # Call the tool logic directly
-    result = await call_biometric_expert.ainvoke({
-        "query": query,
-        "user_id": user_id,
-        "thread_id": thread_id
-    })
-    
+    result = await call_biometric_expert.ainvoke({"query": query, "user_id": user_id, "thread_id": thread_id})
+
     return {"messages": [AIMessage(content=result)]}
 
 
@@ -178,22 +171,26 @@ def supervisor_node(state: AgentState):
 
     llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=GOOGLE_API_KEY)
 
-
     # Add system context with formatting instructions
     system_prompt_content = (
-        "You are a versatile AI Orchestrator. Your role is to coordinate between the user and specialized Expert Agents. "
-        "Analyze the user's intent, call the appropriate tools, and synthesize results into a clear, friendly response.\n\n"
+        "You are a versatile AI Orchestrator. Your role is to coordinate between the user and specialized Expert "
+        "Agents. "
+        "Analyze the user's intent, call the appropriate tools, and synthesize results into a clear, friendly "
+        "response.\n\n"
         "USER CONTEXT:\n"
-        f"You are currently assisting user: '{state['user_id']}'. All data retrieved via tools will be specific to this user profile.\n\n"
+        f"You are currently assisting user: '{state['user_id']}'. "
+        "All data retrieved via tools will be specific to this user profile.\n\n"
         "SPECIALIZED COMMANDS:\n"
         "- If the user wants to connect Garmin, they should use /garmin_login.\n"
         "- If the user wants to force a data sync, they should use /garmin_sync.\n"
         "You can inform the user about these commands if they seem lost.\n\n"
         "LANGUAGE POLICY:\n"
-        "Always respond in the same language the user is speaking. If the user asks in English, respond in English. If the user asks in Spanish, respond in Spanish. This is mandatory.\n\n"
+        "Always respond in the same language the user is speaking. If the user asks in English, respond in English. "
+        "If the user asks in Spanish, respond in Spanish. This is mandatory.\n\n"
         "IMPORTANT FORMATTING RULES for Telegram (Chat Interface):\n"
         "1. DO NOT use Markdown tables. Use bulleted lists instead.\n"
-        "2. VERTICAL SPACING: Use double newlines (two '\\n') between list items and between different sections to ensure good readability on mobile screens.\n"
+        "2. VERTICAL SPACING: Use double newlines (two '\\n') between list items and between different sections "
+        "to ensure good readability on mobile screens.\n"
         "3. Every item in a schedule or list MUST be on its own line with a blank line between items.\n"
         "4. Use **bold** for emphasis and emojis to keep the tone friendly.\n"
         "5. If you provide a schedule, use a clear 'Day - Activity' list format with ample spacing."
@@ -235,21 +232,14 @@ workflow.add_node("tools", tool_node)
 
 workflow.add_edge(START, "router")
 workflow.add_conditional_edges(
-    "router",
-    route_to_agent,
-    {
-        "biometric_expert": "biometric_expert",
-        "supervisor": "supervisor"
-    }
+    "router", route_to_agent, {"biometric_expert": "biometric_expert", "supervisor": "supervisor"}
 )
 
 # Expert nodes go to END or can go to supervisor for synthesis
 # For now, let's have them go to END as they are specialized experts
 workflow.add_edge("biometric_expert", END)
 
-workflow.add_conditional_edges(
-    "supervisor", should_continue, {"tools": "tools", END: END}
-)
+workflow.add_conditional_edges("supervisor", should_continue, {"tools": "tools", END: END})
 workflow.add_edge("tools", "supervisor")
 
 graph = workflow.compile(checkpointer=memory)
@@ -281,86 +271,97 @@ class MessageProcessor:
         text = text.replace("\\n", "\n")
 
         # 1. Table-to-List Transformation (Robust Version)
-        lines = text.split('\n')
+        lines = text.split("\n")
         processed_lines = []
         in_table = False
-        
+
         # Mapping for biometric emojis
         emojis = {
-            "distance": "📍", "distancia": "📍",
-            "hr": "❤️", "bpm": "❤️", "frecuencia": "❤️",
-            "pace": "⏱️", "ritmo": "⏱️",
-            "power": "⚡", "potencia": "⚡",
-            "time": "🕒", "tiempo": "🕒", "duración": "🕒",
-            "calories": "🔥", "calorías": "🔥",
-            "vo2": "📈", "sleep": "😴", "sueño": "😴",
-            "hrv": "⚖️"
+            "distance": "📍",
+            "distancia": "📍",
+            "hr": "❤️",
+            "bpm": "❤️",
+            "frecuencia": "❤️",
+            "pace": "⏱️",
+            "ritmo": "⏱️",
+            "power": "⚡",
+            "potencia": "⚡",
+            "time": "🕒",
+            "tiempo": "🕒",
+            "duración": "🕒",
+            "calories": "🔥",
+            "calorías": "🔥",
+            "vo2": "📈",
+            "sleep": "😴",
+            "sueño": "😴",
+            "hrv": "⚖️",
         }
 
         for line in lines:
             stripped = line.strip()
             # Detect table line
-            if stripped.startswith('|') and stripped.endswith('|'):
+            if stripped.startswith("|") and stripped.endswith("|"):
                 # Split and clean parts
-                parts = [p.strip() for p in stripped.split('|') if p.strip()]
-                
+                parts = [p.strip() for p in stripped.split("|") if p.strip()]
+
                 # Skip separators like |:---|
-                if not parts or all(re.match(r'[:\-]+', p) for p in parts):
+                if not parts or all(re.match(r"[:\-]+", p) for p in parts):
                     continue
-                
+
                 if not in_table:
                     # First real line is the header, we skip it but mark we are in a table
                     in_table = True
-                    processed_lines.append("") # Initial air
+                    processed_lines.append("")  # Initial air
                     continue
-                
+
                 if len(parts) >= 2:
                     metric_name = parts[0]
                     value = " | ".join(parts[1:])
-                    
+
                     # Find emoji
                     icon = ""
                     for e_key, emoji in emojis.items():
                         if e_key in metric_name.lower():
                             icon = emoji + " "
                             break
-                    
+
                     processed_lines.append(f"{icon}**{metric_name}:** {value}")
                 else:
                     processed_lines.append(f"• {parts[0]}")
             else:
                 if in_table:
                     in_table = False
-                    processed_lines.append("") # End of table air
+                    processed_lines.append("")  # End of table air
                 processed_lines.append(line)
-        
-        text = '\n'.join(processed_lines)
+
+        text = "\n".join(processed_lines)
 
         # 2. Aggressive Spacing for Sections
         # Markers that need a double newline before them (Structural)
         # We exclude friendly emojis like 😊 to keep them inline
-        structural_markers = [r'###', r'🔹', r'⚠️', r'✅', r'📅', r'🔔', r'🏃', r'🔋', r'💪', r'🧘‍♂️']
+        structural_markers = [r"###", r"🔹", r"⚠️", r"✅", r"📅", r"🔔", r"🏃", r"🔋", r"💪", r"🧘‍♂️"]
         for marker in structural_markers:
             # Only inject if preceded by a character that isn't a newline or space
-            text = re.sub(rf'([^\n\s])\s*({marker})', r'\1\n\n\2', text)
+            text = re.sub(rf"([^\n\s])\s*({marker})", r"\1\n\n\2", text)
 
         # 3. MarkdownV2 Escaping
         reserved = r"\_*[]()~`>#+-=|{}.!"
+
         def escape_match(match):
-            return '\\' + match.group(0)
-        
-        text = re.sub(rf'([{re.escape(reserved)}])', escape_match, text)
+            return "\\" + match.group(0)
+
+        text = re.sub(rf"([{re.escape(reserved)}])", escape_match, text)
 
         # 4. Restoration of intended formatting
         # Headers: ### -> Bold
         text = re.sub(r"\\#\\#\\# (.*?)(?:\n|$)", r"*\1*\n", text)
         # Bold: \*text\* -> *text* (Note: we use single * in V2)
-        text = re.sub(r'\\\*\\\*(.*?)\\\*\\\*', r'*\1*', text)
+        text = re.sub(r"\\\*\\\*(.*?)\\\*\\\*", r"*\1*", text)
         # Italics: \_text\_ -> _text_
-        text = re.sub(r'\\\_(.*?)\\\_', r'_\1_', text)
+        text = re.sub(r"\\\_(.*?)\\\_", r"_\1_", text)
 
         # Final Cleanup: Max 2 newlines
-        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
 
         return text.strip()
 
@@ -404,6 +405,7 @@ async def register(payload: RegisterPayload):
         return {"status": "success", "platform_user_id": platform_id}
     # If registration failed but it's the same telegram_id, just return the existing mapping
     from db import get_platform_id
+
     existing_pid = get_platform_id(payload.telegram_id)
     if existing_pid:
         return {"status": "success", "platform_user_id": existing_pid}
@@ -415,9 +417,7 @@ async def notify(payload: NotificationPayload):
     """
     Sends a proactive notification to a user via Telegram.
     """
-    logger.info(
-        f"Notification request for user: {payload.user_id} from agent: {payload.agent_id}"
-    )
+    logger.info(f"Notification request for user: {payload.user_id} from agent: {payload.agent_id}")
 
     chat_id = get_telegram_id(payload.user_id)
     if not chat_id:
@@ -432,9 +432,9 @@ async def notify(payload: NotificationPayload):
 
     # Use the unified formatter
     clean_message = MessageProcessor.decode(payload.message)
-    
+
     # Escape agent_id separately for the header
-    safe_agent_id = re.sub(r'([\_*\[\]()~`>#+\-=|{}.!])', r'\\\1', payload.agent_id)
+    safe_agent_id = re.sub(r"([\_*\[\]()~`>#+\-=|{}.!])", r"\\\1", payload.agent_id)
     header = f"🔔 *Notification from {safe_agent_id}*"
     formatted_message = f"{header}\n\n{clean_message}"
 
@@ -460,7 +460,7 @@ async def notify(payload: NotificationPayload):
 
 @app.post("/stream")
 async def chat_stream(
-    request: Request,
+    _request: Request,
     x_user_id: str = Header(..., alias="X-User-ID"),
     text: str | None = Form(None),
     thread_id: str = Form(...),
@@ -472,14 +472,12 @@ async def chat_stream(
         content = await file.read()
 
         # Upload to Google Generative AI
-        temp_file_path = f"/tmp/{file.filename}"
-        with open(temp_file_path, "wb") as f:
+        temp_file = Path(f"/tmp/{file.filename}")
+        with temp_file.open("wb") as f:
             f.write(content)
 
         try:
-            uploaded_file = genai.upload_file(
-                path=temp_file_path, mime_type=file.content_type
-            )
+            uploaded_file = genai.upload_file(path=str(temp_file), mime_type=file.content_type)
             # Use gemini-1.5-flash for transcription as it supports audio input
             transcription_model = genai.GenerativeModel("gemini-1.5-flash")
             response = transcription_model.generate_content(
@@ -493,8 +491,8 @@ async def chat_stream(
             text = response.text
             logger.info(f"Transcribed text: {text}")
         finally:
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
+            if temp_file.exists():
+                temp_file.unlink()
 
     # Initialize state
     initial_messages = [HumanMessage(content=text)]
@@ -541,9 +539,10 @@ async def chat_stream(
         # We split by characters or small chunks to simulate streaming without losing newlines
         chunk_size = 10
         for i in range(0, len(final_message), chunk_size):
-            yield f"data: {json.dumps({'text': final_message[i:i+chunk_size]})}\n\n"
+            yield f"data: {json.dumps({'text': final_message[i : i + chunk_size]})}\n\n"
 
         yield "data: [DONE]\n\n"
+
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
