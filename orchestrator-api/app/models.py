@@ -24,7 +24,8 @@ class IntentClassifier(BaseModel):
         ...,
         description=(
             "The classified intent of the user. "
-            "'biometric_expert' for health, training, Garmin, or physiological queries. Includes commands like /garmin-login. "
+            "'biometric_expert' for health, training, Garmin, or physiological queries. "
+            "Includes specific commands like /garmin_login and /garmin_sync. "
             "'general_chat' for greetings, small talk, or general non-specialized questions. "
             "'unknown' for ambiguous queries or intents not covered by existing experts."
         )
