@@ -1,14 +1,16 @@
-from typing import Annotated, List, Literal, TypedDict, Any
+from typing import Annotated, Any, Literal, TypedDict
+
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
+
 
 class AgentState(TypedDict):
     """
     Represents the state of the Orchestrator graph.
     Uses LangGraph's native add_messages reducer for the message history.
     """
-    messages: Annotated[List[BaseMessage], add_messages]
+    messages: Annotated[list[BaseMessage], add_messages]
     user_id: str
     thread_id: str
     intent: str

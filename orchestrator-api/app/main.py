@@ -1,26 +1,23 @@
-import os
 import json
 import logging
+import os
 import re
-from typing import List, Optional, Annotated
-from fastapi import FastAPI, Request, Header, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from dotenv import load_dotenv
+from typing import Annotated
 
 import google.generativeai as genai
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.graph import StateGraph, END, START
-from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, InjectedState
-from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
-from langchain_core.tools import tool
 import httpx
-
+from db import get_telegram_id, get_user_mapping, init_db, register_user
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, Header, Request, UploadFile
+from fastapi.responses import StreamingResponse
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.tools import tool
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import InjectedState, ToolNode
 from models import AgentState, IntentClassifier
-
-from db import init_db, get_user_mapping, register_user, get_telegram_id
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -44,7 +41,7 @@ init_db()
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 if os.path.exists(CONFIG_PATH):
     try:
-        with open(CONFIG_PATH, "r") as f:
+        with open(CONFIG_PATH) as f:
             config = json.load(f)
             users = config.get("users", {})
             for tid, pid in users.items():
@@ -345,14 +342,14 @@ class MessageProcessor:
         structural_markers = [r'###', r'🔹', r'⚠️', r'✅', r'📅', r'🔔', r'🏃', r'🔋', r'💪', r'🧘‍♂️']
         for marker in structural_markers:
             # Only inject if preceded by a character that isn't a newline or space
-            text = re.sub(r'([^\n\s])\s*(%s)' % marker, r'\1\n\n\2', text)
+            text = re.sub(rf'([^\n\s])\s*({marker})', r'\1\n\n\2', text)
 
         # 3. MarkdownV2 Escaping
         reserved = r"\_*[]()~`>#+-=|{}.!"
         def escape_match(match):
             return '\\' + match.group(0)
         
-        text = re.sub(r'([%s])' % re.escape(reserved), escape_match, text)
+        text = re.sub(rf'([{re.escape(reserved)}])', escape_match, text)
 
         # 4. Restoration of intended formatting
         # Headers: ### -> Bold
@@ -405,13 +402,12 @@ async def register(payload: RegisterPayload):
     success = register_user(payload.telegram_id, platform_id)
     if success:
         return {"status": "success", "platform_user_id": platform_id}
-    else:
-        # If registration failed but it's the same telegram_id, just return the existing mapping
-        from db import get_platform_id
-        existing_pid = get_platform_id(payload.telegram_id)
-        if existing_pid:
-            return {"status": "success", "platform_user_id": existing_pid}
-        return {"status": "error", "message": "Failed to register user"}
+    # If registration failed but it's the same telegram_id, just return the existing mapping
+    from db import get_platform_id
+    existing_pid = get_platform_id(payload.telegram_id)
+    if existing_pid:
+        return {"status": "success", "platform_user_id": existing_pid}
+    return {"status": "error", "message": "Failed to register user"}
 
 
 @app.post("/api/notify")
@@ -455,9 +451,8 @@ async def notify(payload: NotificationPayload):
             if response.status_code == 200:
                 logger.info(f"Notification sent successfully to {payload.user_id}")
                 return {"status": "success"}
-            else:
-                logger.error(f"Failed to send Telegram message: {response.text}")
-                return {"status": "error", "message": response.text}
+            logger.error(f"Failed to send Telegram message: {response.text}")
+            return {"status": "error", "message": response.text}
         except Exception as e:
             logger.exception(f"Exception while sending notification: {e}")
             return {"status": "error", "message": str(e)}
@@ -467,9 +462,9 @@ async def notify(payload: NotificationPayload):
 async def chat_stream(
     request: Request,
     x_user_id: str = Header(..., alias="X-User-ID"),
-    text: Optional[str] = Form(None),
+    text: str | None = Form(None),
     thread_id: str = Form(...),
-    file: Optional[UploadFile] = File(None),
+    file: UploadFile | None = File(None),
 ):
     # Handle Voice if file is provided
     if file:

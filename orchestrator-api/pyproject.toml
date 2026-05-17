@@ -1,0 +1,41 @@
+[project]
+name = "orchestrator-api"
+version = "0.1.0"
+description = "Modular Swarm Architecture Orchestrator API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "langgraph>=0.0.26",
+    "langchain-google-genai>=0.0.9",
+    "google-generativeai>=0.3.0",
+    "httpx>=0.26.0",
+    "python-dotenv>=1.0.1",
+    "pydantic>=2.6.0",
+    "python-multipart>=0.0.7",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.3.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.26.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "RET", "SIM", "ARG", "PTH"]
+ignore = [
+    "B008", # Allow FastAPI Depends
+    "E402", # Allow imports after environment setup
+    "T201", # Allow print in CLI/scripts
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

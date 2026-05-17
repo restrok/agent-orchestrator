@@ -1,10 +1,11 @@
-import os
+import asyncio
 import json
 import logging
-import httpx
-import asyncio
-from dotenv import load_dotenv
+import os
 import re
+
+import httpx
+from dotenv import load_dotenv
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
@@ -20,9 +21,10 @@ class MessageProcessor:
         """
         if not text:
             return ""
-        # Remove excessive whitespace
-        text = re.sub(r'\n{3,}', '\n\n', text.strip())
-        return text
+        # Remove excessive whitespace and strip each line
+        lines = [line.strip() for line in text.strip().split("\n")]
+        text = "\n".join(lines)
+        return re.sub(r"\n{3,}", "\n\n", text)
 
     @staticmethod
     def decode(text: str) -> str:
@@ -88,14 +90,14 @@ class MessageProcessor:
         structural_markers = [r'###', r'🔹', r'⚠️', r'✅', r'📅', r'🔔', r'🏃', r'🔋', r'💪', r'🧘‍♂️']
         for marker in structural_markers:
             # Only inject if preceded by a character that isn't a newline or space
-            text = re.sub(r'([^\n\s])\s*(%s)' % marker, r'\1\n\n\2', text)
+            text = re.sub(rf'([^\n\s])\s*({marker})', r'\1\n\n\2', text)
 
         # 3. MarkdownV2 Escaping
         reserved = r"\_*[]()~`>#+-=|{}.!"
         def escape_match(match):
             return '\\' + match.group(0)
         
-        text = re.sub(r'([%s])' % re.escape(reserved), escape_match, text)
+        text = re.sub(rf'([{re.escape(reserved)}])', escape_match, text)
 
         # 4. Restoration of intended formatting
         # Headers: ### -> Bold
