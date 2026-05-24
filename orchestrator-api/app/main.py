@@ -1,8 +1,8 @@
+import html
 import json
 import logging
 import os
 import re
-import html
 from pathlib import Path
 from typing import Annotated
 
@@ -170,8 +170,6 @@ def supervisor_node(state: AgentState):
     # Log only the last few messages to keep logs clean
     for i, msg in enumerate(state["messages"][-3:]):
         logger.info(f"Message {i}: {type(msg).__name__} - {str(msg.content)[:100]}...")
-
-    llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=GOOGLE_API_KEY)
 
     # Add system context with formatting instructions
     system_prompt_content = (

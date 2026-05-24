@@ -1,5 +1,6 @@
 from main import MessageProcessor
 
+
 def test_user_sample_formatting():
     sample_text = """Hola, *fsirio*. Como tu Head Coach, he realizado una *extracción y síntesis total de tu base de datos biométricos*. No es un resumen superficial, sino una auditoría técnica de tu estado fisiológico, mecánico y metabólico actual.
 
@@ -26,7 +27,7 @@ Tu estructura mecánica está absorbiendo la carga actual con una eficiencia not
 *3. 💤 Arquitectura del Sueño y Recuperación (La "Reparación")*
 Aquí es donde identificamos la principal oportunidad de optimización.
 
-*   *Calidad vs. Cantidad:* Tu calidad de sueño es alta (77/100) y el sueño profundo es excelente (*1.43h*), asegurando la reparación física de los tejidos.
+*   *Calidad vs. Cantidad:* Tu calidad de sueño es alta (77/100) and el sueño profundo es excelente (*1.43h*), asegurando la reparación física de los tejidos.
 *   *Déficit de Volumen:* Tu duración total es corta ($\approx$ 6.5h) and el sueño REM está ligeramente por debajo del umbral óptimo (*18.5% vs 20%*).
 *   *Impacto:* Aunque tu corazón está recuperado, la falta de volumen de sueño y REM puede afectar tu agudeza mental y la recuperación del sistema nervioso central a largo plazo.
 
@@ -60,29 +61,18 @@ Estás en un estado físico *SÓLIDO y SEGURO*. Tienes un motor eficiente y una 
 ✅ OPTIMIZADO PARA EL SIGUIENTE NIVEL.**"""
 
     decoded = MessageProcessor.decode(sample_text)
-    
-    # Check that backslashes followed by reserved chars are present (for Telegram's parser)
-    # but that our intended formatting (bold/italic) is clean.
-    
-    # Telegram MarkdownV2 expects dots, hyphens, etc to be escaped: \. \-
-    assert r"\." in decoded
-    assert r"\-" in decoded
-    assert r"\(" in decoded
-    
-    # But our restoration logic should have converted **text** to *text* (Telegram bold)
-    # The sample uses *text* which is Telegram italic.
-    # Actually, the user sample uses *fsirio* which is italic in V2.
-    
-    # Let's see what the processor does with *text*
-    # L103: text = re.sub(r'\\\_(.*?)\\\_', r'_\1_', text)
-    # L101: text = re.sub(r'\\\*\\\*(.*?)\\\*\\\*', r'*\1*', text)
-    
-    # If the input has *text*, it gets escaped to \*text\* then it stays \*text\* unless we restore it.
-    # Current restoration only handles ** (bold) and _ (italic).
-    
+
+    # HTML mode doesn't need to escape dots, hyphens, etc.
+    assert r"\." not in decoded
+    assert r"\-" not in decoded
+
+    # But it must escape < and > (though they aren't in this sample except in tags we add)
+
+    # Check for HTML tags
+    assert "<b>fsirio</b>" in decoded
+    assert "<b>extracción" in decoded
+    assert "<i>Thinking" not in decoded  # only in stream
+
     print("\n--- DECODED OUTPUT START ---")
     print(decoded)
     print("--- DECODED OUTPUT END ---\n")
-
-if __name__ == "__main__":
-    test_user_sample_formatting()

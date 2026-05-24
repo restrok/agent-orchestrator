@@ -27,6 +27,7 @@ select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "RET", "SIM", "ARG", "PTH"]
 ignore = [
     "E402", # Allow imports after environment setup
     "T201", # Allow print in CLI/scripts
+    "E501", # Allow long lines
 ]
 
 [tool.pytest.ini_options]

@@ -7,21 +7,21 @@ def test_message_processor_basic_clean():
     cleaned = MessageProcessor.encode(dirty_text)
     assert cleaned == "Hello\n\nWorld"
 
-def test_message_processor_markdown_escaping():
-    """Test MarkdownV2 escaping logic."""
-    raw_text = "Hello *world* _underscore_ [link](http://test.com) - dot. ! bang"
-    # The processor should escape reserved characters that are NOT part of the restoration logic
-    # In this project, it seems to escape most things then restore some.
-    escaped = MessageProcessor.decode(raw_text)
-    
-    # Check if some reserved chars are escaped
-    assert r"\." in escaped
-    assert r"\-" in escaped
-    assert r"\!" in escaped
-    # restoration logic should keep *, _, [ intact if they are balanced
-    assert "*" in escaped
-    assert "_" in escaped
-    assert "[" in escaped
+
+def test_message_processor_html_escaping():
+    """Test HTML escaping logic."""
+    raw_text = "Hello *world* _italic_ <tag> & amp"
+    # The processor should escape HTML reserved characters and restore formatting
+    decoded = MessageProcessor.decode(raw_text)
+
+    # Check if some HTML reserved chars are escaped
+    assert "&lt;tag&gt;" in decoded
+    assert "&amp;" in decoded
+
+    # restoration logic should convert * to <b> and _ to <i>
+    assert "<b>world</b>" in decoded
+    assert "<i>italic</i>" in decoded
+
 
 def test_message_processor_splitting():
     """Test smart splitting at newlines."""
