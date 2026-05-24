@@ -16,9 +16,6 @@ services:
       - orchestrator_data:/app/data
     restart: unless-stopped
 
-volumes:
-  orchestrator_data:
-
   gateway:
     build:
       context: ./telegram-gateway
@@ -32,3 +29,6 @@ volumes:
     environment:
       - API_URL=http://orchestrator:8001
     restart: unless-stopped
+
+volumes:
+  orchestrator_data:

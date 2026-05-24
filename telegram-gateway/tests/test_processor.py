@@ -22,3 +22,13 @@ def test_message_processor_markdown_escaping():
     assert "*" in escaped
     assert "_" in escaped
     assert "[" in escaped
+
+def test_message_processor_splitting():
+    """Test smart splitting at newlines."""
+    long_text = "Line 1\nLine 2\nLine 3"
+    # Split with a very small limit
+    chunks = MessageProcessor.split_message(long_text, max_length=7)
+    assert len(chunks) == 3
+    assert chunks[0] == "Line 1"
+    assert chunks[1] == "Line 2"
+    assert chunks[2] == "Line 3"

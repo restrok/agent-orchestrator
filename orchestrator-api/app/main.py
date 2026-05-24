@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import html
 from pathlib import Path
 from typing import Annotated
 
@@ -82,7 +83,7 @@ async def call_biometric_expert(
             BIOMETRIC_API_URL,
             json={"messages": [{"role": "user", "content": query}], "user": user_id},
             headers={"X-User-ID": user_id},
-            timeout=120.0,
+            timeout=600.0,
         )
         if response.status_code == 200:
             data = response.json()
@@ -97,6 +98,7 @@ async def call_biometric_expert(
 
 tools = [call_biometric_expert]
 tool_node = ToolNode(tools)
+
 
 # --- LangGraph Setup ---
 
@@ -199,8 +201,6 @@ def supervisor_node(state: AgentState):
 
     messages_to_send = [system_prompt] + state["messages"]
 
-    # Simple supervisor logic
-    llm_with_tools = llm.bind_tools(tools)
     try:
         response = llm_with_tools.invoke(messages_to_send)
         return {"messages": [response], "loop_count": current_loops + 1}
@@ -221,6 +221,9 @@ def should_continue(state: AgentState):
         return "tools"
     return END
 
+
+llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=GOOGLE_API_KEY)
+llm_with_tools = llm.bind_tools(tools)
 
 memory = MemorySaver()
 
@@ -261,27 +264,27 @@ class MessageProcessor:
     @staticmethod
     def decode(text: str) -> str:
         """
-        Formats AI response for Telegram MarkdownV2.
-        Converts tables to lists and ensures vertical spacing.
+        Robustly formats text for Telegram's HTML mode.
         """
         if not text:
             return ""
 
-        # Handle literal \n if they come as strings
+        # 1. Initial cleanup and Handle literal \n
         text = text.replace("\\n", "\n")
 
-        # 1. Table-to-List Transformation (Robust Version)
+        # 2. Table-to-List Transformation
         lines = text.split("\n")
         processed_lines = []
         in_table = False
 
         # Mapping for biometric emojis
         emojis = {
-            "distance": "📍",
-            "distancia": "📍",
+            "heart": "❤️",
             "hr": "❤️",
             "bpm": "❤️",
             "frecuencia": "❤️",
+            "distance": "📍",
+            "distancia": "📍",
             "pace": "⏱️",
             "ritmo": "⏱️",
             "power": "⚡",
@@ -325,7 +328,7 @@ class MessageProcessor:
                             icon = emoji + " "
                             break
 
-                    processed_lines.append(f"{icon}**{metric_name}:** {value}")
+                    processed_lines.append(f"{icon}<b>{metric_name}:</b> {value}")
                 else:
                     processed_lines.append(f"• {parts[0]}")
             else:
@@ -336,31 +339,27 @@ class MessageProcessor:
 
         text = "\n".join(processed_lines)
 
-        # 2. Aggressive Spacing for Sections
-        # Markers that need a double newline before them (Structural)
-        # We exclude friendly emojis like 😊 to keep them inline
-        structural_markers = [r"###", r"🔹", r"⚠️", r"✅", r"📅", r"🔔", r"🏃", r"🔋", r"💪", r"🧘‍♂️"]
+        # 3. Structural Headers & Spacing
+        # Convert ### to Bold and ensure vertical spacing
+        text = re.sub(r"^###\s+(.*)$", r"\n\n<b>\1</b>\n", text, flags=re.MULTILINE)
+
+        # Ensure structural emojis have proper spacing
+        structural_markers = [r"🔹", r"⚠️", r"✅", r"📅", r"🔔", r"🏃", r"🔋", r"💪", r"🧘‍♂️", r"🎯"]
         for marker in structural_markers:
             # Only inject if preceded by a character that isn't a newline or space
-            text = re.sub(rf"([^\n\s])\s*({marker})", r"\1\n\n\2", text)
+            text = re.sub(rf"([^\n])\s*({marker})", r"\1\n\n\2", text)
+            text = re.sub(rf"({marker})([^\s])", r"\1 \2", text)
 
-        # 3. MarkdownV2 Escaping
-        reserved = r"\_*[]()~`>#+-=|{}.!"
+        # 4. HTML Escaping
+        text = html.escape(text, quote=False)
 
-        def escape_match(match):
-            return "\\" + match.group(0)
+        # 5. Restoration of Formatting Entities (using HTML tags)
+        # Bold: *text* or **text**
+        text = re.sub(r"\*(\*?)(?!\s)(.+?)(?<!\s)\1\*", r"<b>\2</b>", text, flags=re.DOTALL)
+        # Italic: _text_
+        text = re.sub(r"_(?!\s)(.+?)(?<!\s)_", r"<i>\1</i>", text, flags=re.DOTALL)
 
-        text = re.sub(rf"([{re.escape(reserved)}])", escape_match, text)
-
-        # 4. Restoration of intended formatting
-        # Headers: ### -> Bold
-        text = re.sub(r"\\#\\#\\# (.*?)(?:\n|$)", r"*\1*\n", text)
-        # Bold: \*text\* -> *text* (Note: we use single * in V2)
-        text = re.sub(r"\\\*\\\*(.*?)\\\*\\\*", r"*\1*", text)
-        # Italics: \_text\_ -> _text_
-        text = re.sub(r"\\\_(.*?)\\\_", r"_\1_", text)
-
-        # Final Cleanup: Max 2 newlines
+        # 6. Final Cleanup
         text = re.sub(r"\n{3,}", "\n\n", text)
 
         return text.strip()
@@ -434,8 +433,8 @@ async def notify(payload: NotificationPayload):
     clean_message = MessageProcessor.decode(payload.message)
 
     # Escape agent_id separately for the header
-    safe_agent_id = re.sub(r"([\_*\[\]()~`>#+\-=|{}.!])", r"\\\1", payload.agent_id)
-    header = f"🔔 *Notification from {safe_agent_id}*"
+    safe_agent_id = html.escape(payload.agent_id, quote=False)
+    header = f"🔔 <b>Notification from {safe_agent_id}</b>"
     formatted_message = f"{header}\n\n{clean_message}"
 
     async with httpx.AsyncClient() as client:
@@ -445,7 +444,7 @@ async def notify(payload: NotificationPayload):
                 json={
                     "chat_id": chat_id,
                     "text": formatted_message,
-                    "parse_mode": "MarkdownV2",
+                    "parse_mode": "HTML",
                 },
             )
             if response.status_code == 200:
@@ -537,7 +536,7 @@ async def chat_stream(
 
         # Simulate token streaming of the final message preserving structure
         # We split by characters or small chunks to simulate streaming without losing newlines
-        chunk_size = 10
+        chunk_size = 100
         for i in range(0, len(final_message), chunk_size):
             yield f"data: {json.dumps({'text': final_message[i : i + chunk_size]})}\n\n"
 
