@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import html
 import json
 import logging
 import os
@@ -12,6 +14,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 
 # Load environment variables
 load_dotenv()
+
 
 class MessageProcessor:
     @staticmethod
@@ -27,45 +30,79 @@ class MessageProcessor:
         return re.sub(r"\n{3,}", "\n\n", text)
 
     @staticmethod
+    def split_message(text: str, max_length: int = 4000) -> list[str]:
+        """
+        Splits a message into chunks, preferably at newlines.
+        """
+        if not text:
+            return []
+        if len(text) <= max_length:
+            return [text]
+
+        chunks = []
+        while text:
+            if len(text) <= max_length:
+                chunks.append(text)
+                break
+
+            # Find the last newline within the limit
+            split_at = text.rfind("\n", 0, max_length)
+            if split_at == -1:
+                # If no newline, split at max_length
+                split_at = max_length
+
+            chunks.append(text[:split_at])
+            text = text[split_at:].lstrip("\n")
+        return chunks
+
+    @staticmethod
     def decode(text: str) -> str:
         """
-        Formats AI response for Telegram MarkdownV2.
-        Converts tables to lists and ensures vertical spacing.
+        Robustly formats text for Telegram's HTML mode.
         """
         if not text:
             return ""
 
-        # Handle literal \n if they come as strings
+        # 1. Initial cleanup and Handle literal \n
         text = text.replace("\\n", "\n")
 
-        # 1. Table-to-List Transformation (Robust Version)
-        lines = text.split('\n')
+        # 2. Table-to-List Transformation
+        lines = text.split("\n")
         processed_lines = []
         in_table = False
-        
+
         emojis = {
-            "distance": "📍", "distancia": "📍",
-            "hr": "❤️", "bpm": "❤️", "frecuencia": "❤️",
-            "pace": "⏱️", "ritmo": "⏱️",
-            "power": "⚡", "potencia": "⚡",
-            "time": "🕒", "tiempo": "🕒", "duración": "🕒",
-            "calories": "🔥", "calorías": "🔥",
-            "vo2": "📈", "sleep": "😴", "sueño": "😴",
-            "hrv": "⚖️"
+            "heart": "❤️",
+            "hr": "❤️",
+            "bpm": "❤️",
+            "frecuencia": "❤️",
+            "distance": "📍",
+            "distancia": "📍",
+            "pace": "⏱️",
+            "ritmo": "⏱️",
+            "power": "⚡",
+            "potencia": "⚡",
+            "time": "🕒",
+            "tiempo": "🕒",
+            "duración": "🕒",
+            "calories": "🔥",
+            "calorías": "🔥",
+            "vo2": "📈",
+            "sleep": "😴",
+            "sueño": "😴",
+            "hrv": "⚖️",
         }
 
         for line in lines:
             stripped = line.strip()
-            if stripped.startswith('|') and stripped.endswith('|'):
-                parts = [p.strip() for p in stripped.split('|') if p.strip()]
-                if not parts or all(re.match(r'[:\-]+', p) for p in parts):
+            if stripped.startswith("|") and stripped.endswith("|"):
+                parts = [p.strip() for p in stripped.split("|") if p.strip()]
+                if not parts or all(re.match(r"[:\-]+", p) for p in parts):
                     continue
-                
                 if not in_table:
                     in_table = True
                     processed_lines.append("")
                     continue
-                
                 if len(parts) >= 2:
                     metric_name = parts[0]
                     value = " | ".join(parts[1:])
@@ -74,7 +111,7 @@ class MessageProcessor:
                         if e_key in metric_name.lower():
                             icon = emoji + " "
                             break
-                    processed_lines.append(f"{icon}**{metric_name}:** {value}")
+                    processed_lines.append(f"{icon}<b>{metric_name}:</b> {value}")
                 else:
                     processed_lines.append(f"• {parts[0]}")
             else:
@@ -82,41 +119,40 @@ class MessageProcessor:
                     in_table = False
                     processed_lines.append("")
                 processed_lines.append(line)
-        
-        text = '\n'.join(processed_lines)
 
-        # 2. Aggressive Spacing for Sections
-        # Markers that need a double newline before them (Structural)
-        structural_markers = [r'###', r'🔹', r'⚠️', r'✅', r'📅', r'🔔', r'🏃', r'🔋', r'💪', r'🧘‍♂️']
+        text = "\n".join(processed_lines)
+
+        # 3. Structural Headers & Spacing
+        # Convert ### to Bold and ensure vertical spacing
+        text = re.sub(r"^###\s+(.*)$", r"\n\n<b>\1</b>\n", text, flags=re.MULTILINE)
+
+        # Ensure structural emojis have proper spacing
+        structural_markers = [r"🔹", r"⚠️", r"✅", r"📅", r"🔔", r"🏃", r"🔋", r"💪", r"🧘‍♂️", r"🎯"]
         for marker in structural_markers:
-            # Only inject if preceded by a character that isn't a newline or space
-            text = re.sub(rf'([^\n\s])\s*({marker})', r'\1\n\n\2', text)
+            text = re.sub(rf"([^\n])\s*({marker})", r"\1\n\n\2", text)
+            text = re.sub(rf"({marker})([^\s])", r"\1 \2", text)
 
-        # 3. MarkdownV2 Escaping
-        reserved = r"\_*[]()~`>#+-=|{}.!"
-        def escape_match(match):
-            return '\\' + match.group(0)
-        
-        text = re.sub(rf'([{re.escape(reserved)}])', escape_match, text)
+        # 4. HTML Escaping
+        text = html.escape(text, quote=False)
 
-        # 4. Restoration of intended formatting
-        # Headers: ### -> Bold
-        text = re.sub(r"\\#\\#\\# (.*?)(?:\n|$)", r"*\1*\n", text)
-        # Bold: \*\*text\*\* -> *text* (Telegram V2 uses single * for bold)
-        text = re.sub(r'\\\*\\\*(.*?)\\\*\\\*', r'*\1*', text)
-        # Italics: \_text\_ -> _text_
-        text = re.sub(r'\\\_(.*?)\\\_', r'_\1_', text)
+        # 5. Restoration of Formatting Entities (using HTML tags)
+        # Bold: *text* or **text**
+        text = re.sub(r"\*(\*?)(?!\s)(.+?)(?<!\s)\1\*", r"<b>\2</b>", text, flags=re.DOTALL)
+        # Italic: _text_
+        text = re.sub(r"_(?!\s)(.+?)(?<!\s)_", r"<i>\1</i>", text, flags=re.DOTALL)
 
-        # Final Cleanup: Max 2 newlines
-        text = re.sub(r'\n{3,}', '\n\n', text)
+        # 6. Final Cleanup
+        text = re.sub(r"\n{3,}", "\n\n", text)
 
         return text.strip()
+
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_URL = os.getenv("API_URL")
 
 # Global user mapping cache
 USER_MAPPING = {}
+
 
 async def fetch_user_mapping():
     """Fetches the latest user mapping from the orchestrator."""
@@ -132,15 +168,14 @@ async def fetch_user_mapping():
     except Exception as e:
         logging.error(f"Error fetching user mapping: {e}")
 
+
 async def register_new_user(telegram_id: str, username: str):
     """Registers a new user with the orchestrator."""
     global USER_MAPPING
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{API_URL}/api/users/register",
-                json={"telegram_id": telegram_id, "username": username},
-                timeout=10.0
+                f"{API_URL}/api/users/register", json={"telegram_id": telegram_id, "username": username}, timeout=10.0
             )
             if response.status_code == 200:
                 data = response.json()
@@ -154,11 +189,10 @@ async def register_new_user(telegram_id: str, username: str):
         logging.error(f"Error registering user: {e}")
     return None
 
+
 # Logging setup
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+
 
 async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -166,15 +200,17 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     if not update.message or not update.message.text:
         return
-    
+
     await handle_text(update, context)
+
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
-    
+
     encoded_text = MessageProcessor.encode(update.message.text)
     await process_request(update, context, text=encoded_text)
+
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.voice:
@@ -182,8 +218,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     voice_file = await update.message.voice.get_file()
     voice_bytes = await voice_file.download_as_bytearray()
-    
+
     await process_request(update, context, voice_bytes=voice_bytes, voice_mime=update.message.voice.mime_type)
+
 
 async def process_request(
     update: Update, _context: ContextTypes.DEFAULT_TYPE, text=None, voice_bytes=None, voice_mime=None
@@ -195,9 +232,7 @@ async def process_request(
         # Silent Registration
         logging.info(f"New user detected: {telegram_user_id}. Attempting silent registration.")
         username = (
-            update.message.from_user.username
-            or update.message.from_user.first_name
-            or f"user_{telegram_user_id}"
+            update.message.from_user.username or update.message.from_user.first_name or f"user_{telegram_user_id}"
         )
         platform_user_id = await register_new_user(telegram_user_id, username)
 
@@ -209,21 +244,17 @@ async def process_request(
             return
 
     chat_id = update.message.chat_id
-    
+
     # Send initial "thinking" message
-    thinking_message = await update.message.reply_text(
-        r"_Thinking\.\.\._", parse_mode=ParseMode.MARKDOWN_V2
-    )
+    thinking_message = await update.message.reply_text("<i>Thinking...</i>", parse_mode=ParseMode.HTML)
 
     try:
         async with httpx.AsyncClient() as client:
             files = None
-            data = {
-                "thread_id": str(chat_id)
-            }
-            
+            data = {"thread_id": str(chat_id)}
+
             if voice_bytes:
-                files = {'file': ('voice.ogg', bytes(voice_bytes), voice_mime)}
+                files = {"file": ("voice.ogg", bytes(voice_bytes), voice_mime)}
             else:
                 data["text"] = text
 
@@ -231,15 +262,15 @@ async def process_request(
             headers = {
                 "X-User-ID": platform_user_id,
             }
-            
+
             # Using /stream endpoint for SSE
             stream_url = f"{API_URL}/stream"
-            
+
             full_response = ""
             last_update_time = 0
-            
+
             async with client.stream(
-                "POST", stream_url, data=data, files=files, headers=headers, timeout=150.0
+                "POST", stream_url, data=data, files=files, headers=headers, timeout=610.0
             ) as response:
                 if response.status_code != 200:
                     error_text = await response.aread()
@@ -254,35 +285,46 @@ async def process_request(
                         content = line[6:]
                         if content == "[DONE]":
                             break
-                        
+
                         try:
                             chunk = json.loads(content)
                             token = chunk.get("text", "")
                             full_response += token
-                            
+
                             # Throttle updates to Telegram to avoid rate limits
                             current_time = asyncio.get_event_loop().time()
                             if current_time - last_update_time > 1.0 and full_response.strip():
-                                # DECODE the partial response to ensure valid MarkdownV2
+                                # DECODE the partial response to ensure valid HTML
                                 formatted_partial = MessageProcessor.decode(full_response)
-                                await thinking_message.edit_text(
-                                    formatted_partial + "...", parse_mode=ParseMode.MARKDOWN_V2
-                                )
+                                with contextlib.suppress(Exception):
+                                    await thinking_message.edit_text(
+                                        formatted_partial + "...", parse_mode=ParseMode.HTML
+                                    )
                                 last_update_time = current_time
                         except json.JSONDecodeError:
                             continue
                         except Exception as e:
                             logging.warning(f"Error during partial update: {e}")
-                            # Fallback if MarkdownV2 fails during stream
                             continue
 
             if full_response:
-                formatted_final = MessageProcessor.decode(full_response)
-                try:
-                    await thinking_message.edit_text(formatted_final, parse_mode=ParseMode.MARKDOWN_V2)
-                except Exception:
-                    logging.warning("MarkdownV2 parsing failed, falling back to plain text")
-                    await thinking_message.edit_text(full_response)
+                # Split the raw response
+                raw_chunks = MessageProcessor.split_message(full_response, 3800)
+
+                for i, raw_chunk in enumerate(raw_chunks):
+                    formatted_chunk = MessageProcessor.decode(raw_chunk)
+                    try:
+                        if i == 0:
+                            await thinking_message.edit_text(formatted_chunk, parse_mode=ParseMode.HTML)
+                        else:
+                            await update.message.reply_text(formatted_chunk, parse_mode=ParseMode.HTML)
+                    except Exception as e:
+                        logging.warning(f"HTML failed for chunk {i}: {e}")
+                        # Fallback to plain text
+                        if i == 0:
+                            await thinking_message.edit_text(raw_chunk)
+                        else:
+                            await update.message.reply_text(raw_chunk)
             else:
                 await thinking_message.edit_text("The agent returned an empty response.")
 
@@ -290,7 +332,8 @@ async def process_request(
         logging.exception("Error during API request")
         await thinking_message.edit_text("An error occurred while processing your request.")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     if not TELEGRAM_BOT_TOKEN or not API_URL:
         print("Error: TELEGRAM_BOT_TOKEN and API_URL must be set in .env")
         exit(1)
@@ -299,10 +342,10 @@ if __name__ == '__main__':
     asyncio.run(fetch_user_mapping())
 
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    
+
     # Handle both regular text and commands (like /garmin-login)
     application.add_handler(MessageHandler(filters.TEXT, handle_text))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    
+
     print("Telegram Gateway started...")
     application.run_polling()
