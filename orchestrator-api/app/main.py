@@ -221,7 +221,7 @@ def should_continue(state: AgentState):
     return END
 
 
-llm = get_chat_model(model_name=model_name)
+llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=GOOGLE_API_KEY)
 llm_with_tools = llm.bind_tools(tools)
 
 memory = MemorySaver()
