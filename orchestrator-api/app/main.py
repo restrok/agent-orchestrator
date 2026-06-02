@@ -18,6 +18,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import InjectedState, ToolNode
+from llm_factory import get_chat_model
 from models import AgentState, IntentClassifier
 from pydantic import BaseModel
 
@@ -55,7 +56,7 @@ if CONFIG_PATH.exists():
         logger.error(f"Failed to migrate from {CONFIG_PATH}: {e}")
 
 genai.configure(api_key=GOOGLE_API_KEY)
-model_name = "gemma-4-31b-it"
+model_name = "gemini-3.1-flash-lite"
 
 
 app = FastAPI(title="Telegram Agent Orchestrator")
@@ -122,7 +123,7 @@ async def node_router(state: AgentState):
 
     logger.info(f"Classifying intent for: {str(last_message)[:100]}...")
 
-    llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=GOOGLE_API_KEY, temperature=0)
+    llm = get_chat_model(model_name=model_name, temperature=0)
     structured_llm = llm.with_structured_output(IntentClassifier)
 
     try:
