@@ -121,6 +121,13 @@ async def node_router(state: AgentState):
         logger.warning("No human message found in state. Defaulting to 'unknown'.")
         return {"intent": "unknown"}
 
+    # HARDCODED OVERRIDES: Ensure critical commands are routed instantly
+    last_msg_str = str(last_message).lower()
+    sync_commands = ["/garmin_sync", "/garmin_sync_full", "/garmin_login", "sync garmin"]
+    if any(cmd in last_msg_str for cmd in sync_commands):
+        logger.info(f"🎯 Hardcoded Override: Routing {last_msg_str} to Biometric Expert.")
+        return {"intent": "biometric_expert"}
+
     logger.info(f"Classifying intent for: {str(last_message)[:100]}...")
 
     llm = get_chat_model(model_name=model_name, temperature=0)
@@ -221,7 +228,7 @@ def should_continue(state: AgentState):
     return END
 
 
-llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=GOOGLE_API_KEY)
+llm = get_chat_model(model_name=model_name)
 llm_with_tools = llm.bind_tools(tools)
 
 memory = MemorySaver()
