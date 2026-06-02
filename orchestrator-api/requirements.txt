@@ -7,3 +7,4 @@ httpx
 python-dotenv
 pydantic
 python-multipart
+langchain-openai
