@@ -9,12 +9,13 @@ def get_chat_model(model_name: str, temperature: float = 0):
 
     if provider == "proxy":
         from langchain_openai import ChatOpenAI
+        from pydantic import SecretStr
 
         proxy_url = os.getenv("LLM_PROXY_URL", "http://host.docker.internal:8000/v1")
         return ChatOpenAI(
             model=model_name,
-            openai_api_base=proxy_url,
-            openai_api_key=os.getenv("OPENAI_API_KEY", "none"),
+            base_url=proxy_url,
+            api_key=SecretStr(os.getenv("OPENAI_API_KEY") or "none"),
             temperature=temperature,
         )
     from langchain_google_genai import ChatGoogleGenerativeAI
