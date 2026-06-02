@@ -1,0 +1,89 @@
+import re
+
+class MessageProcessor:
+    @staticmethod
+    def decode(text: str) -> str:
+        """
+        Robustly formats text for Telegram's MarkdownV2.
+        Identifies formatting entities, protects them, escapes all other reserved
+        characters, and ensures proper spacing for structural elements.
+        """
+        if not text:
+            return ""
+
+        # 1. Initial cleanup and Handle literal \n
+        text = text.replace("\\n", "\n")
+
+        # 2. Table-to-List Transformation
+        lines = text.split('\n')
+        processed_lines = []
+        in_table = False
+        
+        emojis = {
+            "heart": "❤️", "hr": "❤️", "bpm": "❤️", "frecuencia": "❤️",
+            "distance": "📍", "distancia": "📍",
+            "pace": "⏱️", "ritmo": "⏱️",
+            "power": "⚡", "potencia": "⚡",
+            "time": "🕒", "tiempo": "🕒", "duración": "🕒",
+            "calories": "🔥", "calorías": "🔥",
+            "vo2": "📈", "sleep": "😴", "sueño": "😴",
+            "hrv": "⚖️"
+        }
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('|') and stripped.endswith('|'):
+                parts = [p.strip() for p in stripped.split('|') if p.strip()]
+                if not parts or all(re.match(r'[:\-]+', p) for p in parts):
+                    continue
+                if not in_table:
+                    in_table = True
+                    processed_lines.append("")
+                    continue
+                if len(parts) >= 2:
+                    metric_name = parts[0]
+                    value = " | ".join(parts[1:])
+                    icon = ""
+                    for e_key, emoji in emojis.items():
+                        if e_key in metric_name.lower():
+                            icon = emoji + " "
+                            break
+                    processed_lines.append(f"{icon}*{metric_name}:* {value}")
+                else:
+                    processed_lines.append(f"• {parts[0]}")
+            else:
+                if in_table:
+                    in_table = False
+                    processed_lines.append("")
+                processed_lines.append(line)
+        
+        text = '\n'.join(processed_lines)
+
+        # 3. Structural Headers & Spacing
+        # Convert ### to Bold and ensure vertical spacing
+        text = re.sub(r'^###\s+(.*)$', r'\n\n*\1*\n', text, flags=re.MULTILINE)
+        
+        # Ensure structural emojis have proper spacing
+        structural_markers = [r'🔹', r'⚠️', r'✅', r'📅', r'🔔', r'🏃', r'🔋', r'💪', r'🧘‍♂️', r'🎯']
+        for marker in structural_markers:
+            text = re.sub(rf'([^\n])\s*({marker})', r'\1\n\n\2', text)
+            text = re.sub(rf'({marker})([^\s])', r'\1 \2', text)
+
+        # 4. MarkdownV2 Escaping
+        reserved_chars = r"_*[]()~`>#+-=|{}.!"
+        
+        def escape(t):
+            t = t.replace('\\', '\\\\')
+            return re.sub(f'([{re.escape(reserved_chars)}])', r'\\\1', t)
+
+        text = escape(text)
+
+        # 5. Restoration of Formatting Entities
+        # Restore bold (*text* or **text**) and italic (_text_)
+        text = re.sub(r'\\(\*{1,2})(?!\s)(.+?)(?<!\s)\\\1', r'*\2*', text, flags=re.DOTALL)
+        text = re.sub(r'\\(_)(?!\s)(.+?)(?<!\s)\\_', r'_\2_', text, flags=re.DOTALL)
+
+        # 6. Final Cleanup
+        text = re.sub(r'\n{3,}', '\n\n', text)
+
+        return text.strip()
