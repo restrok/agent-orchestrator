@@ -122,10 +122,10 @@ async def node_router(state: AgentState):
         return {"intent": "unknown"}
 
     # HARDCODED OVERRIDES: Ensure critical commands are routed instantly
-    last_msg_str = str(last_message).lower()
+    msg_lower = last_message.strip().lower()
     sync_commands = ["/garmin_sync", "/garmin_sync_full", "/garmin_login", "sync garmin"]
-    if any(cmd in last_msg_str for cmd in sync_commands):
-        logger.info(f"🎯 Hardcoded Override: Routing {last_msg_str} to Biometric Expert.")
+    if any(msg_lower.startswith(cmd) for cmd in sync_commands):
+        logger.info(f"🎯 Hardcoded Override: Routing '{msg_lower}' to Biometric Expert.")
         return {"intent": "biometric_expert"}
 
     logger.info(f"Classifying intent for: {str(last_message)[:100]}...")
