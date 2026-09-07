@@ -30,9 +30,9 @@ class MessageProcessor:
         return re.sub(r"\n{3,}", "\n\n", text)
 
     @staticmethod
-    def split_message(text: str, max_length: int = 4000) -> list[str]:
+    def split_message(text: str, max_length: int = 3000) -> list[str]:
         """
-        Splits a message into chunks, preferably at newlines.
+        Splits a message into chunks, preferably at paragraphs or newlines.
         """
         if not text:
             return []
@@ -45,14 +45,29 @@ class MessageProcessor:
                 chunks.append(text)
                 break
 
-            # Find the last newline within the limit
-            split_at = text.rfind("\n", 0, max_length)
-            if split_at == -1:
-                # If no newline, split at max_length
-                split_at = max_length
+            # 1. Prefer paragraph break (\n\n)
+            split_at = text.rfind("\n\n", 0, max_length)
+            if split_at != -1 and split_at > max_length // 3:
+                split_len = 2
+            else:
+                # 2. Prefer single newline (\n)
+                split_at = text.rfind("\n", 0, max_length)
+                if split_at != -1 and split_at > max_length // 3:
+                    split_len = 1
+                else:
+                    # 3. Prefer space
+                    split_at = text.rfind(" ", 0, max_length)
+                    if split_at != -1 and split_at > max_length // 3:
+                        split_len = 1
+                    else:
+                        # 4. Hard cut
+                        split_at = max_length
+                        split_len = 0
 
-            chunks.append(text[:split_at])
-            text = text[split_at:].lstrip("\n")
+            chunk = text[:split_at].strip()
+            if chunk:
+                chunks.append(chunk)
+            text = text[split_at + split_len:].strip()
         return chunks
 
     @staticmethod
@@ -136,10 +151,14 @@ class MessageProcessor:
         text = html.escape(text, quote=False)
 
         # 5. Restoration of Formatting Entities (using HTML tags)
-        # Bold: *text* or **text**
-        text = re.sub(r"\*(\*?)(?!\s)(.+?)(?<!\s)\1\*", r"<b>\2</b>", text, flags=re.DOTALL)
-        # Italic: _text_
-        text = re.sub(r"_(?!\s)(.+?)(?<!\s)_", r"<i>\1</i>", text, flags=re.DOTALL)
+        # Inline code: `code`
+        text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+        # Bold: **text**
+        text = re.sub(r"\*\*(?!\s)(.+?)(?<!\s)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+        # Single asterisk bold/italic: *text*
+        text = re.sub(r"(?<!\*)\*(?!\s|\*)(.+?)(?<!\s|\*)\*(?!\*)", r"<b>\1</b>", text, flags=re.DOTALL)
+        # Italic: _text_ (only when surrounded by non-word characters or space)
+        text = re.sub(r"(?<!\w)_(?!\s)(.+?)(?<!\s)_(?!\w)", r"<i>\1</i>", text, flags=re.DOTALL)
 
         # 6. Final Cleanup
         text = re.sub(r"\n{3,}", "\n\n", text)
@@ -169,7 +188,8 @@ async def fetch_user_mapping(retries: int = 5, delay: float = 2.0):
                     USER_MAPPING.update(fetched)
                     logging.info(f"Synchronized {len(USER_MAPPING)} user mappings from orchestrator.")
                     return True
-                logging.error(f"Failed to fetch user mapping: {response.status_code}")
+                else:
+                    logging.error(f"Failed to fetch user mapping: {response.status_code}")
         except Exception as e:
             logging.warning(f"Attempt {attempt + 1}/{retries} error fetching user mapping: {e}")
             if attempt < retries - 1:
@@ -357,23 +377,33 @@ async def process_request(
                             continue
 
             if full_response:
-                # Split the raw response
-                raw_chunks = MessageProcessor.split_message(full_response, 3800)
+                raw_chunks = MessageProcessor.split_message(full_response, 3000)
 
                 for i, raw_chunk in enumerate(raw_chunks):
                     formatted_chunk = MessageProcessor.decode(raw_chunk)
+                    if len(formatted_chunk) > 4000:
+                        send_text = raw_chunk[:4000]
+                        parse_mode = None
+                    else:
+                        send_text = formatted_chunk
+                        parse_mode = ParseMode.HTML
+
                     try:
                         if i == 0:
-                            await thinking_message.edit_text(formatted_chunk, parse_mode=ParseMode.HTML)
+                            await thinking_message.edit_text(send_text, parse_mode=parse_mode)
                         else:
-                            await update.message.reply_text(formatted_chunk, parse_mode=ParseMode.HTML)
+                            await asyncio.sleep(0.35)
+                            await _context.bot.send_message(chat_id=chat_id, text=send_text, parse_mode=parse_mode)
                     except Exception as e:
-                        logging.warning(f"HTML failed for chunk {i}: {e}")
-                        # Fallback to plain text
-                        if i == 0:
-                            await thinking_message.edit_text(raw_chunk)
-                        else:
-                            await update.message.reply_text(raw_chunk)
+                        logging.warning(f"Failed sending chunk {i} with parse_mode={parse_mode}: {e}")
+                        try:
+                            if i == 0:
+                                await thinking_message.edit_text(raw_chunk[:4000])
+                            else:
+                                await asyncio.sleep(0.35)
+                                await _context.bot.send_message(chat_id=chat_id, text=raw_chunk[:4000])
+                        except Exception as ex:
+                            logging.error(f"Fallback plain text failed for chunk {i}: {ex}")
             else:
                 await thinking_message.edit_text("The agent returned an empty response.")
 
@@ -388,7 +418,7 @@ async def heartbeat_loop():
         await asyncio.sleep(600)  # Every 10 mins
 
 
-async def post_init(_application):
+async def post_init(application):
     """Start background tasks."""
     asyncio.create_task(heartbeat_loop())
     asyncio.create_task(fetch_user_mapping(retries=5, delay=2.0))
