@@ -16,6 +16,10 @@ services:
     volumes:
       - ./orchestrator-api/app:/app
       - orchestrator_data:/app/data
+    command: uvicorn main:app --host 0.0.0.0 --port 8001
+    networks:
+      - default
+      - shared_internal_network
     restart: unless-stopped
 
   gateway:
@@ -30,7 +34,17 @@ services:
       - orchestrator
     environment:
       - API_URL=http://orchestrator:8001
+    volumes:
+      - ./telegram-gateway:/app
+    networks:
+      - default
+      - shared_internal_network
     restart: unless-stopped
+
+networks:
+  default:
+  shared_internal_network:
+    external: true
 
 volumes:
   orchestrator_data:

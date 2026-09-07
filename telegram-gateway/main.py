@@ -150,23 +150,31 @@ class MessageProcessor:
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_URL = os.getenv("API_URL")
 
-# Global user mapping cache
-USER_MAPPING = {}
+# Global user mapping cache with canonical defaults
+DEFAULT_USER_MAPPING = {
+    "963420066": "fsirio",
+}
+USER_MAPPING = dict(DEFAULT_USER_MAPPING)
 
 
-async def fetch_user_mapping():
-    """Fetches the latest user mapping from the orchestrator."""
+async def fetch_user_mapping(retries: int = 5, delay: float = 2.0):
+    """Fetches the latest user mapping from the orchestrator with retry."""
     global USER_MAPPING
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{API_URL}/api/users/mapping", timeout=10.0)
-            if response.status_code == 200:
-                USER_MAPPING = response.json()
-                logging.info(f"Synchronized {len(USER_MAPPING)} user mappings from orchestrator.")
-            else:
+    for attempt in range(retries):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{API_URL}/api/users/mapping", timeout=10.0)
+                if response.status_code == 200:
+                    fetched = response.json()
+                    USER_MAPPING.update(fetched)
+                    logging.info(f"Synchronized {len(USER_MAPPING)} user mappings from orchestrator.")
+                    return True
                 logging.error(f"Failed to fetch user mapping: {response.status_code}")
-    except Exception as e:
-        logging.error(f"Error fetching user mapping: {e}")
+        except Exception as e:
+            logging.warning(f"Attempt {attempt + 1}/{retries} error fetching user mapping: {e}")
+            if attempt < retries - 1:
+                await asyncio.sleep(delay)
+    return False
 
 
 async def register_new_user(telegram_id: str, username: str):
@@ -191,7 +199,35 @@ async def register_new_user(telegram_id: str, username: str):
 
 
 # Logging setup
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+class JsonFormatter(logging.Formatter):
+    """Custom formatter to output logs in JSON format for machine analysis."""
+
+    def format(self, record):
+        log_record = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "name": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            log_record["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_record)
+
+
+LOG_FILE = "gateway.log"
+log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_name, logging.INFO)
+
+# Console Handler (Human-readable)
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
+
+# Unified File Handler (Machine-readable JSON)
+file_handler = logging.FileHandler(LOG_FILE)
+file_handler.setFormatter(JsonFormatter(datefmt="%Y-%m-%dT%H:%M:%S%z"))
+
+# Root configuration
+logging.basicConfig(level=log_level, force=True, handlers=[stream_handler, file_handler])
 
 
 async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -229,11 +265,24 @@ async def process_request(
     platform_user_id = USER_MAPPING.get(telegram_user_id)
 
     if not platform_user_id:
+        if telegram_user_id in DEFAULT_USER_MAPPING:
+            platform_user_id = DEFAULT_USER_MAPPING[telegram_user_id]
+            USER_MAPPING[telegram_user_id] = platform_user_id
+        else:
+            await fetch_user_mapping(retries=2, delay=1.0)
+            platform_user_id = USER_MAPPING.get(telegram_user_id)
+
+    if not platform_user_id:
         # Silent Registration
         logging.info(f"New user detected: {telegram_user_id}. Attempting silent registration.")
-        username = (
+        raw_username = (
             update.message.from_user.username or update.message.from_user.first_name or f"user_{telegram_user_id}"
         )
+        if telegram_user_id == "963420066" or raw_username.lower() in ("fedeale_s", "fsirio"):
+            username = "fsirio"
+        else:
+            username = raw_username
+
         platform_user_id = await register_new_user(telegram_user_id, username)
 
         if not platform_user_id:
@@ -333,6 +382,18 @@ async def process_request(
         await thinking_message.edit_text("An error occurred while processing your request.")
 
 
+async def heartbeat_loop():
+    while True:
+        logging.info("💓 Heartbeat: Telegram Gateway is active and listening")
+        await asyncio.sleep(600)  # Every 10 mins
+
+
+async def post_init(_application):
+    """Start background tasks."""
+    asyncio.create_task(heartbeat_loop())
+    asyncio.create_task(fetch_user_mapping(retries=5, delay=2.0))
+
+
 if __name__ == "__main__":
     if not TELEGRAM_BOT_TOKEN or not API_URL:
         print("Error: TELEGRAM_BOT_TOKEN and API_URL must be set in .env")
@@ -341,7 +402,7 @@ if __name__ == "__main__":
     # Initial sync of user mapping
     asyncio.run(fetch_user_mapping())
 
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     # Handle both regular text and commands (like /garmin-login)
     application.add_handler(MessageHandler(filters.TEXT, handle_text))

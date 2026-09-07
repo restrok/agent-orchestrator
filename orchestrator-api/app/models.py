@@ -25,12 +25,16 @@ class IntentClassifier(BaseModel):
     Designed to be scalable by adding more expert agents to the Literal.
     """
 
-    intent: Literal["biometric_expert", "general_chat", "unknown"] = Field(
+    intent: Literal["biometric_expert", "exocortex_brain", "antigravity_worker", "general_chat", "unknown"] = Field(
         ...,
         description=(
             "The classified intent of the user. "
             "'biometric_expert' for health, training, Garmin, or physiological queries. "
             "Includes specific commands like /garmin_login and /garmin_sync. "
+            "'exocortex_brain' for queries or actions involving the user's second brain, memory, notes, "
+            "prior knowledge, decisions, documentation, or workflows stored in Exocortex. "
+            "'antigravity_worker' for engineering tasks, coding, refactoring, modifying files, executing terminal "
+            "commands or automation on the host Lenovo ThinkCentre via Antigravity (agy). "
             "'general_chat' for greetings, small talk, or general non-specialized questions. "
             "'unknown' for ambiguous queries or intents not covered by existing experts."
         ),

@@ -1,8 +1,10 @@
+import asyncio
 import html
 import json
 import logging
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Annotated
 
@@ -25,12 +27,35 @@ from pydantic import BaseModel
 load_dotenv()
 
 # Logging
+class JsonFormatter(logging.Formatter):
+    """Custom formatter to output logs in JSON format for machine analysis."""
+
+    def format(self, record):
+        log_record = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "name": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            log_record["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_record)
+
+
 LOG_FILE = "orchestrator.log"
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()],
-)
+log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_name, logging.INFO)
+
+# Console Handler (Human-readable)
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
+
+# Unified File Handler (Machine-readable JSON)
+file_handler = logging.FileHandler(LOG_FILE)
+file_handler.setFormatter(JsonFormatter(datefmt="%Y-%m-%dT%H:%M:%S%z"))
+
+# Root configuration
+logging.basicConfig(level=log_level, force=True, handlers=[stream_handler, file_handler])
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +63,10 @@ logger = logging.getLogger(__name__)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 BIOMETRIC_API_URL = os.getenv("BIOMETRIC_API_URL", "http://localhost:8080/chat")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+EXOCORTEX_MCP_URL = os.getenv("EXOCORTEX_MCP_URL", "http://192.168.89.30:8765/mcp")
+HOST_SSH_IP = os.getenv("HOST_SSH_IP", "192.168.90.5")
+HOST_SSH_USER = os.getenv("HOST_SSH_USER", "fsirio")
+SSH_KEY_PATH = os.getenv("SSH_KEY_PATH", "/root/.ssh/id_ed25519")
 
 # Initialize Database and migrate if needed
 init_db()
@@ -56,10 +85,22 @@ if CONFIG_PATH.exists():
         logger.error(f"Failed to migrate from {CONFIG_PATH}: {e}")
 
 genai.configure(api_key=GOOGLE_API_KEY)
-model_name = "gemini-3.1-flash-lite"
+model_name = os.getenv("LLM_MODEL", "gemini-1.5-flash")
 
 
 app = FastAPI(title="Telegram Agent Orchestrator")
+
+
+async def heartbeat_loop():
+    while True:
+        logging.info("💓 Heartbeat: Orchestrator API is active and listening")
+        await asyncio.sleep(600)  # Every 10 mins
+
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(heartbeat_loop())
+
 
 # --- Tools ---
 
@@ -78,26 +119,199 @@ async def call_biometric_expert(
     logger.info("------------------------------------")
 
     logger.info(f"Routing request for user {user_id} (thread: {thread_id}) to Biometric Expert")
-    async with httpx.AsyncClient() as client:
-        # Adjusted for /v1/chat/completions "Black Box" interface
-        response = await client.post(
-            BIOMETRIC_API_URL,
-            json={"messages": [{"role": "user", "content": query}], "user": user_id},
-            headers={"X-User-ID": user_id},
-            timeout=600.0,
+    try:
+        async with httpx.AsyncClient() as client:
+            # Increased timeout to 300s (5 mins) to accommodate complex data retrieval
+            response = await client.post(
+                BIOMETRIC_API_URL,
+                json={"messages": [{"role": "user", "content": query}], "user": user_id},
+                headers={"X-User-ID": user_id},
+                timeout=300.0,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                # Standard OpenAI-like response parsing
+                try:
+                    return data["choices"][0]["message"]["content"]
+                except (KeyError, IndexError):
+                    return data.get("response", str(data))
+            else:
+                return f"Error from Biometric Expert: {response.status_code} - {response.text}"
+    except httpx.TimeoutException:
+        logger.error(f"Timeout calling Biometric Expert for user {user_id}")
+        return "The Biometric Expert is taking too long to respond. Please try a simpler question or wait a moment."
+    except Exception as e:
+        logger.error(f"Error calling Biometric Expert: {e}")
+        return f"An error occurred while reaching the Biometric Expert: {str(e)}"
+
+
+# --- Exocortex MCP Client Helper & Tools ---
+
+
+async def _invoke_mcp_tool(tool_name: str, arguments: dict) -> str:
+    """Invoca una herramienta en el servidor MCP Streamable HTTP de Exocortex."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments,
+        },
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(EXOCORTEX_MCP_URL, json=payload, headers=headers)
+            if response.status_code != 200:
+                return f"Error connecting to Exocortex MCP: HTTP {response.status_code} - {response.text}"
+
+            result_data = None
+            for line in response.text.splitlines():
+                if line.startswith("data: "):
+                    json_str = line[6:].strip()
+                    try:
+                        data = json.loads(json_str)
+                        if "result" in data:
+                            result_data = data["result"]
+                            break
+                        elif "error" in data:
+                            return f"Exocortex MCP Error: {data['error']}"
+                    except json.JSONDecodeError:
+                        continue
+
+            if result_data:
+                if "structuredContent" in result_data:
+                    return json.dumps(result_data["structuredContent"], ensure_ascii=False, indent=2)
+                elif "content" in result_data and len(result_data["content"]) > 0:
+                    return result_data["content"][0].get("text", str(result_data["content"]))
+                return json.dumps(result_data, ensure_ascii=False)
+            return response.text
+    except httpx.TimeoutException:
+        return "Exocortex MCP request timed out."
+    except Exception as e:
+        logger.error(f"Error calling Exocortex MCP tool '{tool_name}': {e}")
+        return f"Error contacting Exocortex: {str(e)}"
+
+
+@tool
+async def search_brain(query: str, limit: int = 5) -> str:
+    """Busca conocimiento previo, decisiones históricas, notas de arquitectura o workflows en el Exocortex Brain."""
+    logger.info(f"--- TOOL CALL: search_brain ('{query}', limit={limit}) ---")
+    return await _invoke_mcp_tool("brain_search", {"query": query, "limit": limit})
+
+
+@tool
+async def remember_in_brain(content: str, title: str) -> str:
+    """Almacena conocimiento duradero, notas importantes o decisiones en el Vault del Exocortex Brain."""
+    logger.info(f"--- TOOL CALL: remember_in_brain ('{title}') ---")
+    return await _invoke_mcp_tool("brain_remember", {"content": content, "title": title})
+
+
+@tool
+async def get_brain_health() -> str:
+    """Consulta el estado de salud de los componentes de Exocortex (Vault, Gateway y Neo4j)."""
+    logger.info("--- TOOL CALL: get_brain_health ---")
+    return await _invoke_mcp_tool("brain_health", {})
+
+
+@tool
+async def get_workflow(workflow_id: str) -> str:
+    """Obtiene los detalles y referencias de un workflow específico del Exocortex Brain por su ID."""
+    logger.info(f"--- TOOL CALL: get_workflow ('{workflow_id}') ---")
+    return await _invoke_mcp_tool("brain_get_workflow", {"workflow_id": workflow_id})
+
+
+# --- Antigravity Worker Tool (Exclusive for fsirio) ---
+
+
+@tool
+async def call_antigravity_worker(
+    task: str,
+    target_project: str,
+    user_id: Annotated[str, InjectedState("user_id")],
+    thread_id: Annotated[str, InjectedState("thread_id")],
+) -> str:
+    """Invoca al Agente Worker (Antigravity) para ejecutar tareas autónomas de código, refactors o configuraciones en el host Lenovo.
+    RESTRICCIÓN: Exclusivo para el usuario 'fsirio'."""
+    if user_id != "fsirio":
+        logger.warning(f"Unauthorized access attempt to Antigravity Worker by user: {user_id}")
+        return "⛔ Acceso denegado: El Agente Worker (Antigravity) está restringido exclusivamente a 'fsirio'."
+
+    logger.info(f"🚀 Lanzando Antigravity Worker para fsirio: {task} en {target_project}")
+
+    clean_project = target_project.strip()
+    if clean_project.startswith("/"):
+        workspace_dir = clean_project
+    else:
+        workspace_dir = f"/home/fsirio/{clean_project}"
+
+    key_path = SSH_KEY_PATH
+    if not os.path.exists(key_path) and os.path.exists("/root/.ssh/id_rsa"):
+        key_path = "/root/.ssh/id_rsa"
+
+    remote_cmd = f"cd {shlex.quote(workspace_dir)} && /home/fsirio/.local/bin/agy --dangerously-skip-permissions --print-timeout 15m -p {shlex.quote(task)}"
+    ssh_cmd = [
+        "ssh",
+        "-i",
+        key_path,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=10",
+        f"{HOST_SSH_USER}@{HOST_SSH_IP}",
+        remote_cmd,
+    ]
+
+    logger.info(f"Ejecutando Worker SSH en {HOST_SSH_IP} directorio {workspace_dir}...")
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *ssh_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        if response.status_code == 200:
-            data = response.json()
-            # Standard OpenAI-like response parsing
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=960.0)
+        except asyncio.TimeoutError:
             try:
-                return data["choices"][0]["message"]["content"]
-            except (KeyError, IndexError):
-                return data.get("response", str(data))
+                proc.kill()
+            except Exception:
+                pass
+            return "⚠️ La tarea del Agente Worker (Antigravity) superó el tiempo límite de espera (16 minutos)."
+
+        stdout_str = stdout.decode("utf-8", errors="replace").strip()
+        stderr_str = stderr.decode("utf-8", errors="replace").strip()
+
+        if len(stdout_str) > 3500:
+            stdout_str = "..." + stdout_str[-3500:]
+
+        if proc.returncode == 0:
+            return f"✅ Tarea de Antigravity completada con éxito:\n\n{stdout_str}"
         else:
-            return f"Error from Biometric Expert: {response.status_code} - {response.text}"
+            return (
+                f"⚠️ Antigravity Worker finalizó con código {proc.returncode}.\n"
+                f"Salida:\n{stdout_str}\n"
+                f"Errores:\n{stderr_str}"
+            )
+    except Exception as e:
+        logger.error(f"Error executing Antigravity Worker via SSH: {e}")
+        return f"Error ejecutando Antigravity Worker: {str(e)}"
 
 
-tools = [call_biometric_expert]
+tools = [
+    call_biometric_expert,
+    search_brain,
+    remember_in_brain,
+    get_brain_health,
+    get_workflow,
+    call_antigravity_worker,
+]
 tool_node = ToolNode(tools)
 
 
@@ -126,21 +340,25 @@ async def node_router(state: AgentState):
     sync_commands = ["/garmin_sync", "/garmin_sync_full", "/garmin_login", "sync garmin"]
     if any(msg_lower.startswith(cmd) for cmd in sync_commands):
         logger.info(f"🎯 Hardcoded Override: Routing '{msg_lower}' to Biometric Expert.")
-        return {"intent": "biometric_expert"}
+        return {"intent": "biometric_expert", "loop_count": 0}
 
     logger.info(f"Classifying intent for: {str(last_message)[:100]}...")
 
     llm = get_chat_model(model_name=model_name, temperature=0)
-    structured_llm = llm.with_structured_output(IntentClassifier)
+    provider = os.getenv("LLM_PROVIDER", "google").lower()
+    if provider in ["ollama", "openai", "lmstudio"]:
+        structured_llm = llm.with_structured_output(IntentClassifier, method="function_calling")
+    else:
+        structured_llm = llm.with_structured_output(IntentClassifier)
 
     try:
         classification = await structured_llm.ainvoke(state["messages"])
         logger.info(f"🔍 Intent Classified: {classification.intent.upper()}")
         logger.info(f"💡 Rationale: {classification.rationale}")
-        return {"intent": classification.intent}
+        return {"intent": classification.intent, "loop_count": 0}
     except Exception as e:
         logger.error(f"Intent classification failed: {e}. Falling back to 'unknown'.")
-        return {"intent": "unknown"}
+        return {"intent": "unknown", "loop_count": 0}
 
 
 async def biometric_expert_node(state: AgentState):
@@ -170,7 +388,7 @@ def route_to_agent(state: AgentState):
     return "supervisor"
 
 
-def supervisor_node(state: AgentState):
+async def supervisor_node(state: AgentState):
     current_loops = state.get("loop_count", 0)
     logger.info(f"--- NODE: Supervisor (Loop: {current_loops}) ---")
 
@@ -181,13 +399,22 @@ def supervisor_node(state: AgentState):
 
     # Add system context with formatting instructions
     system_prompt_content = (
-        "You are a versatile AI Orchestrator. Your role is to coordinate between the user and specialized Expert "
-        "Agents. "
-        "Analyze the user's intent, call the appropriate tools, and synthesize results into a clear, friendly "
+        "You are a versatile AI Orchestrator and Supervisor. Your role is to coordinate between the user and specialized Expert "
+        "Agents and Tools. Analyze the user's intent, call the appropriate tools, and synthesize results into a clear, friendly "
         "response.\n\n"
         "USER CONTEXT:\n"
         f"You are currently assisting user: '{state['user_id']}'. "
         "All data retrieved via tools will be specific to this user profile.\n\n"
+        "CAPABILITIES & TOOLS:\n"
+        "1. Biometric Expert (`call_biometric_expert`): Consult physiological data, Garmin activities, sleep, HRV, and running training advice.\n"
+        "2. Exocortex Brain:\n"
+        "   - `search_brain`: Search the user's second brain for past decisions, project notes, architecture docs, or general knowledge.\n"
+        "   - `remember_in_brain`: Save valuable notes, decisions, or durable context into the brain vault.\n"
+        "   - `get_brain_health`: Check Exocortex system health (Vault, Gateway, Neo4j).\n"
+        "   - `get_workflow`: Inspect specific saved workflows or operational procedures by ID.\n"
+        "3. Antigravity Worker (`call_antigravity_worker`):\n"
+        "   - Executes autonomous engineering tasks, coding, refactors, script executions, or workspace modifications on the host Lenovo ThinkCentre via `agy` (Antigravity CLI).\n"
+        "   - CRITICAL SECURITY / ACCESS CONTROL: This tool is STRICTLY RESERVED for user 'fsirio'. Never deny user 'fsirio' when they ask to execute or implement code; immediately call `call_antigravity_worker` with the specified task and target_project (e.g. 'biometric-ai-platform', 'homelab', 'telegram-agent-orchestrator', 'exocortex', etc.). For any user other than 'fsirio', access is strictly forbidden.\n\n"
         "SPECIALIZED COMMANDS:\n"
         "- If the user wants to connect Garmin, they should use /garmin_login.\n"
         "- If the user wants to force a data sync, they should use /garmin_sync.\n"
@@ -205,10 +432,13 @@ def supervisor_node(state: AgentState):
     )
     system_prompt = SystemMessage(content=system_prompt_content)
 
+    llm = get_chat_model(model_name=model_name, temperature=0.1, max_tokens=4096)
+    llm_with_tools = llm.bind_tools(tools)
+    
     messages_to_send = [system_prompt] + state["messages"]
 
     try:
-        response = llm_with_tools.invoke(messages_to_send)
+        response = await llm_with_tools.ainvoke(messages_to_send)
         return {"messages": [response], "loop_count": current_loops + 1}
     except Exception as e:
         logger.error(f"Error invoking LLM: {e}")
@@ -219,7 +449,7 @@ def should_continue(state: AgentState):
     current_loops = state.get("loop_count", 0)
     last_message = state["messages"][-1]
 
-    if current_loops > 4:
+    if current_loops > 6:
         logger.warning(f"⚠️ Loop count ({current_loops}) exceeded. Stopping to preserve API quota.")
         return END
 
@@ -390,6 +620,25 @@ class RegisterPayload(BaseModel):
 @app.post("/api/users/register")
 async def register(payload: RegisterPayload):
     """Registers a new user."""
+    from db import CANONICAL_USERS, CANONICAL_ALIASES, get_platform_id
+
+    # Check canonical mappings first
+    if payload.telegram_id in CANONICAL_USERS:
+        platform_id = CANONICAL_USERS[payload.telegram_id]
+        register_user(payload.telegram_id, platform_id)
+        return {"status": "success", "platform_user_id": platform_id}
+
+    cleaned_username = payload.username.lower()
+    if cleaned_username in CANONICAL_ALIASES:
+        platform_id = CANONICAL_ALIASES[cleaned_username]
+        register_user(payload.telegram_id, platform_id)
+        return {"status": "success", "platform_user_id": platform_id}
+
+    # If user already registered, return existing
+    existing_pid = get_platform_id(payload.telegram_id)
+    if existing_pid:
+        return {"status": "success", "platform_user_id": existing_pid}
+
     # Simple username cleaning
     platform_id = re.sub(r"\W+", "_", payload.username.lower()).strip("_")
 
@@ -408,8 +657,6 @@ async def register(payload: RegisterPayload):
     success = register_user(payload.telegram_id, platform_id)
     if success:
         return {"status": "success", "platform_user_id": platform_id}
-    # If registration failed but it's the same telegram_id, just return the existing mapping
-    from db import get_platform_id
 
     existing_pid = get_platform_id(payload.telegram_id)
     if existing_pid:
@@ -511,6 +758,7 @@ async def chat_stream(
             "messages": initial_messages,
             "user_id": x_user_id,
             "thread_id": thread_id,
+            "loop_count": 0,
         }
 
         # Run with checkpointer

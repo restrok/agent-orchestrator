@@ -57,10 +57,13 @@ coverage.xml
 .pytest_cache/
 cover/
 
-# Django stuff:
+# Databases
 local_settings.py
+*.db
+*.db-journal
 db.sqlite3
 db.sqlite3-journal
+orchestrator-api/app/data/*.db
 
 # Sphinx documentation
 docs/_build/
