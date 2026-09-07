@@ -8,14 +8,23 @@ DB_DIR = Path(__file__).parent / "data"
 DB_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DB_DIR / "orchestrator.db"
 
-CANONICAL_USERS = {
-    "963420066": "fsirio",
-}
+import json
+import os
 
-CANONICAL_ALIASES = {
-    "fedeale_s": "fsirio",
-    "fsirio": "fsirio",
-}
+def _load_env_json(var_name: str) -> dict[str, str]:
+    val = os.getenv(var_name, "").strip()
+    if not val:
+        return {}
+    try:
+        data = json.loads(val)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except Exception as e:
+        logger.warning(f"Failed to parse {var_name} from environment: {e}")
+    return {}
+
+CANONICAL_USERS = _load_env_json("CANONICAL_USER_MAPPING")
+CANONICAL_ALIASES = _load_env_json("CANONICAL_USER_ALIASES")
 
 
 def init_db():
@@ -29,13 +38,10 @@ def init_db():
         )
     """)
     for tid, pid in CANONICAL_USERS.items():
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT INTO users (telegram_id, platform_user_id) VALUES (?, ?)
             ON CONFLICT(telegram_id) DO UPDATE SET platform_user_id = excluded.platform_user_id
-        """,
-            (tid, pid),
-        )
+        """, (tid, pid))
     conn.commit()
     conn.close()
     logger.info(f"Database initialized and canonical users synchronized at {DB_PATH}")

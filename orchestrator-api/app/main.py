@@ -63,10 +63,11 @@ logger = logging.getLogger(__name__)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 BIOMETRIC_API_URL = os.getenv("BIOMETRIC_API_URL", "http://localhost:8080/chat")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-EXOCORTEX_MCP_URL = os.getenv("EXOCORTEX_MCP_URL", "http://192.168.89.30:8765/mcp")
-HOST_SSH_IP = os.getenv("HOST_SSH_IP", "192.168.90.5")
-HOST_SSH_USER = os.getenv("HOST_SSH_USER", "fsirio")
+EXOCORTEX_MCP_URL = os.getenv("EXOCORTEX_MCP_URL", "http://localhost:8765/mcp")
+HOST_SSH_IP = os.getenv("HOST_SSH_IP", "127.0.0.1")
+HOST_SSH_USER = os.getenv("HOST_SSH_USER", "worker")
 SSH_KEY_PATH = os.getenv("SSH_KEY_PATH", "/root/.ssh/id_ed25519")
+ALLOWED_WORKER_USERS = [u.strip() for u in os.getenv("ALLOWED_WORKER_USERS", "").split(",") if u.strip()]
 
 # Initialize Database and migrate if needed
 init_db()
@@ -235,25 +236,24 @@ async def call_antigravity_worker(
     user_id: Annotated[str, InjectedState("user_id")],
     thread_id: Annotated[str, InjectedState("thread_id")],
 ) -> str:
-    """Invoca al Agente Worker (Antigravity) para ejecutar tareas autónomas de código, refactors o configuraciones en el host Lenovo.
-    RESTRICCIÓN: Exclusivo para el usuario 'fsirio'."""
-    if user_id != "fsirio":
+    """Invoca al Agente Worker (Antigravity) para ejecutar tareas autónomas de código, refactors o configuraciones en el host."""
+    if ALLOWED_WORKER_USERS and user_id not in ALLOWED_WORKER_USERS:
         logger.warning(f"Unauthorized access attempt to Antigravity Worker by user: {user_id}")
-        return "⛔ Acceso denegado: El Agente Worker (Antigravity) está restringido exclusivamente a 'fsirio'."
+        return "⛔ Acceso denegado: El Agente Worker (Antigravity) está restringido a usuarios autorizados."
 
-    logger.info(f"🚀 Lanzando Antigravity Worker para fsirio: {task} en {target_project}")
+    logger.info(f"🚀 Lanzando Antigravity Worker para {user_id}: {task} en {target_project}")
 
     clean_project = target_project.strip()
     if clean_project.startswith("/"):
         workspace_dir = clean_project
     else:
-        workspace_dir = f"/home/fsirio/{clean_project}"
+        workspace_dir = f"/home/{HOST_SSH_USER}/{clean_project}"
 
     key_path = SSH_KEY_PATH
     if not os.path.exists(key_path) and os.path.exists("/root/.ssh/id_rsa"):
         key_path = "/root/.ssh/id_rsa"
 
-    remote_cmd = f"cd {shlex.quote(workspace_dir)} && /home/fsirio/.local/bin/agy --dangerously-skip-permissions --print-timeout 15m -p {shlex.quote(task)}"
+    remote_cmd = f"cd {shlex.quote(workspace_dir)} && agy --dangerously-skip-permissions --print-timeout 15m -p {shlex.quote(task)}"
     ssh_cmd = [
         "ssh",
         "-i",
@@ -420,8 +420,8 @@ async def supervisor_node(state: AgentState):
         "   - `get_brain_health`: Check Exocortex system health (Vault, Gateway, Neo4j).\n"
         "   - `get_workflow`: Inspect specific saved workflows or operational procedures by ID.\n"
         "3. Antigravity Worker (`call_antigravity_worker`):\n"
-        "   - Executes autonomous engineering tasks, coding, refactors, script executions, or workspace modifications on the host Lenovo ThinkCentre via `agy` (Antigravity CLI).\n"
-        "   - CRITICAL SECURITY / ACCESS CONTROL: This tool is STRICTLY RESERVED for user 'fsirio'. Never deny user 'fsirio' when they ask to execute or implement code; immediately call `call_antigravity_worker` with the specified task and target_project (e.g. 'biometric-ai-platform', 'homelab', 'telegram-agent-orchestrator', 'exocortex', etc.). For any user other than 'fsirio', access is strictly forbidden.\n\n"
+        "   - Executes autonomous engineering tasks, coding, refactors, script executions, or workspace modifications on the host via `agy` (Antigravity CLI).\n"
+        "   - CRITICAL SECURITY / ACCESS CONTROL: This tool is STRICTLY RESERVED for authorized users. Never deny an authorized user when they ask to execute or implement code; immediately call `call_antigravity_worker` with the specified task and target_project. For any unauthorized user, access is strictly forbidden.\n\n"
         "SPECIALIZED COMMANDS:\n"
         "- If the user wants to connect Garmin, they should use /garmin_login.\n"
         "- If the user wants to force a data sync, they should use /garmin_sync.\n"

@@ -169,10 +169,20 @@ class MessageProcessor:
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_URL = os.getenv("API_URL")
 
-# Global user mapping cache with canonical defaults
-DEFAULT_USER_MAPPING = {
-    "963420066": "fsirio",
-}
+def _load_env_json(var_name: str) -> dict[str, str]:
+    val = os.getenv(var_name, "").strip()
+    if not val:
+        return {}
+    try:
+        data = json.loads(val)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except Exception as e:
+        logging.warning(f"Failed to parse {var_name} from env: {e}")
+    return {}
+
+# Global user mapping cache loaded from environment defaults
+DEFAULT_USER_MAPPING = _load_env_json("DEFAULT_USER_MAPPING")
 USER_MAPPING = dict(DEFAULT_USER_MAPPING)
 
 
@@ -298,12 +308,7 @@ async def process_request(
         raw_username = (
             update.message.from_user.username or update.message.from_user.first_name or f"user_{telegram_user_id}"
         )
-        if telegram_user_id == "963420066" or raw_username.lower() in ("fedeale_s", "fsirio"):
-            username = "fsirio"
-        else:
-            username = raw_username
-
-        platform_user_id = await register_new_user(telegram_user_id, username)
+        platform_user_id = await register_new_user(telegram_user_id, raw_username)
 
         if not platform_user_id:
             logging.error(f"Could not register user {telegram_user_id}")
