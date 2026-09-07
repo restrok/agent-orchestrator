@@ -24,6 +24,7 @@ def _load_env_json(var_name: str) -> dict[str, str]:
         logger.warning(f"Failed to parse {var_name} from environment: {e}")
     return {}
 
+
 CANONICAL_USERS = _load_env_json("CANONICAL_USER_MAPPING")
 CANONICAL_ALIASES = _load_env_json("CANONICAL_USER_ALIASES")
 
@@ -39,10 +40,13 @@ def init_db():
         )
     """)
     for tid, pid in CANONICAL_USERS.items():
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO users (telegram_id, platform_user_id) VALUES (?, ?)
             ON CONFLICT(telegram_id) DO UPDATE SET platform_user_id = excluded.platform_user_id
-        """, (tid, pid))
+        """,
+            (tid, pid),
+        )
     conn.commit()
     conn.close()
     logger.info(f"Database initialized and canonical users synchronized at {DB_PATH}")

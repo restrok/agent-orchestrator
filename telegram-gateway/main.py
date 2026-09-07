@@ -67,7 +67,7 @@ class MessageProcessor:
             chunk = text[:split_at].strip()
             if chunk:
                 chunks.append(chunk)
-            text = text[split_at + split_len:].strip()
+            text = text[split_at + split_len :].strip()
         return chunks
 
     @staticmethod
@@ -169,6 +169,7 @@ class MessageProcessor:
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_URL = os.getenv("API_URL")
 
+
 def _load_env_json(var_name: str) -> dict[str, str]:
     val = os.getenv(var_name, "").strip()
     if not val:
@@ -180,6 +181,7 @@ def _load_env_json(var_name: str) -> dict[str, str]:
     except Exception as e:
         logging.warning(f"Failed to parse {var_name} from env: {e}")
     return {}
+
 
 # Global user mapping cache loaded from environment defaults
 DEFAULT_USER_MAPPING = _load_env_json("DEFAULT_USER_MAPPING")

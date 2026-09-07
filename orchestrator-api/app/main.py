@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 
+
 # Logging
 class JsonFormatter(logging.Formatter):
     """Custom formatter to output logs in JSON format for machine analysis."""
@@ -277,6 +278,7 @@ async def call_antigravity_worker(
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=960.0)
         except asyncio.TimeoutError:
             import contextlib
+
             with contextlib.suppress(Exception):
                 proc.kill()
             return "⚠️ La tarea del Agente Worker (Antigravity) superó el tiempo límite de espera (16 minutos)."
@@ -442,7 +444,7 @@ async def supervisor_node(state: AgentState):
 
     llm = get_chat_model(model_name=model_name, temperature=0.1, max_tokens=4096)
     llm_with_tools = llm.bind_tools(tools)
-    
+
     messages_to_send = [system_prompt] + state["messages"]
 
     try:
