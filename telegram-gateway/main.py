@@ -198,7 +198,6 @@ async def fetch_user_mapping(retries: int = 5, delay: float = 2.0):
                     USER_MAPPING.update(fetched)
                     logging.info(f"Synchronized {len(USER_MAPPING)} user mappings from orchestrator.")
                     return True
-                else:
                     logging.error(f"Failed to fetch user mapping: {response.status_code}")
         except Exception as e:
             logging.warning(f"Attempt {attempt + 1}/{retries} error fetching user mapping: {e}")
@@ -423,7 +422,7 @@ async def heartbeat_loop():
         await asyncio.sleep(600)  # Every 10 mins
 
 
-async def post_init(application):
+async def post_init(_application):
     """Start background tasks."""
     asyncio.create_task(heartbeat_loop())
     asyncio.create_task(fetch_user_mapping(retries=5, delay=2.0))

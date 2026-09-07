@@ -10,7 +10,7 @@
 
 ## 🤖 LLM Configuration
 - **Primary Local Provider:** LM Studio.
-- **Current Host:** `http://192.168.88.240:1234/v1` (Updated 2026-06-06).
+- **Current Host:** `http://<lm-studio-host>:1234/v1` (Updated 2026-06-06).
 - **Default Fallback:** `llm_factory.py` contains hardcoded fallbacks to the current network IP.
 
 ## 🛠️ Workflows

@@ -31,7 +31,7 @@ def get_chat_model(model_name: str, temperature: float = 0, **kwargs):
         from langchain_openai import ChatOpenAI
         from pydantic import SecretStr
 
-        lm_studio_url = os.getenv("LM_STUDIO_BASE_URL", "http://192.168.88.240:1234/v1")
+        lm_studio_url = os.getenv("LM_STUDIO_BASE_URL", "http://localhost:1234/v1")
         # Added defensive defaults for local models
         return ChatOpenAI(
             model=model_name,

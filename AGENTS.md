@@ -7,9 +7,9 @@
 - **Restart Command:** `cd ~/homelab/agent-orchestrator && docker-compose up -d`
 
 ## 🌐 Network & IPs
-- **LM Studio Host:** `http://192.168.88.240:1234/v1` (Primary LLM Provider)
-- **Orchestrator API (Static):** `192.168.89.28`
-- **Telegram Gateway (Static):** `192.168.89.29`
+- **LM Studio Host:** `http://<lm-studio-host>:1234/v1` (Primary LLM Provider)
+- **Orchestrator API (Static):** `http://orchestrator:8001`
+- **Telegram Gateway (Static):** `http://gateway:8002`
 
 ## 📂 Configuration Files
 - **Orchestrator Env:** `~/homelab/agent-orchestrator/.env.orchestrator`

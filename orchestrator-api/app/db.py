@@ -11,6 +11,7 @@ DB_PATH = DB_DIR / "orchestrator.db"
 import json
 import os
 
+
 def _load_env_json(var_name: str) -> dict[str, str]:
     val = os.getenv(var_name, "").strip()
     if not val:

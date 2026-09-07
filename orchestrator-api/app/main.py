@@ -16,7 +16,6 @@ from fastapi import FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import InjectedState, ToolNode
@@ -179,7 +178,7 @@ async def _invoke_mcp_tool(tool_name: str, arguments: dict) -> str:
                         if "result" in data:
                             result_data = data["result"]
                             break
-                        elif "error" in data:
+                        if "error" in data:
                             return f"Exocortex MCP Error: {data['error']}"
                     except json.JSONDecodeError:
                         continue
@@ -187,7 +186,7 @@ async def _invoke_mcp_tool(tool_name: str, arguments: dict) -> str:
             if result_data:
                 if "structuredContent" in result_data:
                     return json.dumps(result_data["structuredContent"], ensure_ascii=False, indent=2)
-                elif "content" in result_data and len(result_data["content"]) > 0:
+                if "content" in result_data and len(result_data["content"]) > 0:
                     return result_data["content"][0].get("text", str(result_data["content"]))
                 return json.dumps(result_data, ensure_ascii=False)
             return response.text
@@ -226,7 +225,7 @@ async def get_workflow(workflow_id: str) -> str:
     return await _invoke_mcp_tool("brain_get_workflow", {"workflow_id": workflow_id})
 
 
-# --- Antigravity Worker Tool (Exclusive for fsirio) ---
+# --- Antigravity Worker Tool (Exclusive for authorized users) ---
 
 
 @tool
@@ -234,9 +233,9 @@ async def call_antigravity_worker(
     task: str,
     target_project: str,
     user_id: Annotated[str, InjectedState("user_id")],
-    thread_id: Annotated[str, InjectedState("thread_id")],
+    _thread_id: Annotated[str, InjectedState("thread_id")],
 ) -> str:
-    """Invoca al Agente Worker (Antigravity) para ejecutar tareas autónomas de código, refactors o configuraciones en el host."""
+    """Invoca al Agente Worker (Antigravity) para ejecutar tareas autónomas en el host."""
     if ALLOWED_WORKER_USERS and user_id not in ALLOWED_WORKER_USERS:
         logger.warning(f"Unauthorized access attempt to Antigravity Worker by user: {user_id}")
         return "⛔ Acceso denegado: El Agente Worker (Antigravity) está restringido a usuarios autorizados."
@@ -244,16 +243,14 @@ async def call_antigravity_worker(
     logger.info(f"🚀 Lanzando Antigravity Worker para {user_id}: {task} en {target_project}")
 
     clean_project = target_project.strip()
-    if clean_project.startswith("/"):
-        workspace_dir = clean_project
-    else:
-        workspace_dir = f"/home/{HOST_SSH_USER}/{clean_project}"
+    workspace_dir = clean_project if clean_project.startswith("/") else f"/home/{HOST_SSH_USER}/{clean_project}"
 
     key_path = SSH_KEY_PATH
-    if not os.path.exists(key_path) and os.path.exists("/root/.ssh/id_rsa"):
+    if not Path(key_path).exists() and Path("/root/.ssh/id_rsa").exists():
         key_path = "/root/.ssh/id_rsa"
 
-    remote_cmd = f"cd {shlex.quote(workspace_dir)} && agy --dangerously-skip-permissions --print-timeout 15m -p {shlex.quote(task)}"
+    cmd_flags = "--dangerously-skip-permissions --print-timeout 15m"
+    remote_cmd = f"cd {shlex.quote(workspace_dir)} && agy {cmd_flags} -p {shlex.quote(task)}"
     ssh_cmd = [
         "ssh",
         "-i",
@@ -279,10 +276,9 @@ async def call_antigravity_worker(
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=960.0)
         except asyncio.TimeoutError:
-            try:
+            import contextlib
+            with contextlib.suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
             return "⚠️ La tarea del Agente Worker (Antigravity) superó el tiempo límite de espera (16 minutos)."
 
         stdout_str = stdout.decode("utf-8", errors="replace").strip()
@@ -300,12 +296,11 @@ async def call_antigravity_worker(
 
         if proc.returncode == 0:
             return f"✅ Tarea de Antigravity completada con éxito:\n\n{stdout_str}"
-        else:
-            return (
-                f"⚠️ Antigravity Worker finalizó con código {proc.returncode}.\n"
-                f"Salida:\n{stdout_str}\n"
-                f"Errores:\n{stderr_str}"
-            )
+        return (
+            f"⚠️ Antigravity Worker finalizó con código {proc.returncode}.\n"
+            f"Salida:\n{stdout_str}\n"
+            f"Errores:\n{stderr_str}"
+        )
     except Exception as e:
         logger.error(f"Error executing Antigravity Worker via SSH: {e}")
         return f"Error ejecutando Antigravity Worker: {str(e)}"
@@ -406,32 +401,38 @@ async def supervisor_node(state: AgentState):
 
     # Add system context with formatting instructions
     system_prompt_content = (
-        "You are a versatile AI Orchestrator and Supervisor. Your role is to coordinate between the user and specialized Expert "
-        "Agents and Tools. Analyze the user's intent, call the appropriate tools, and synthesize results into a clear, friendly "
-        "response.\n\n"
+        "You are a versatile AI Orchestrator and Supervisor. Your role is to coordinate between "
+        "the user and specialized Expert Agents and Tools. Analyze the user's intent, call the "
+        "appropriate tools, and synthesize results into a clear, friendly response.\n\n"
         "USER CONTEXT:\n"
         f"You are currently assisting user: '{state['user_id']}'. "
         "All data retrieved via tools will be specific to this user profile.\n\n"
         "CAPABILITIES & TOOLS:\n"
-        "1. Biometric Expert (`call_biometric_expert`): Consult physiological data, Garmin activities, sleep, HRV, and running training advice.\n"
+        "1. Biometric Expert (`call_biometric_expert`): Consult physiological data, Garmin "
+        "activities, sleep, HRV, and running training advice.\n"
         "2. Exocortex Brain:\n"
-        "   - `search_brain`: Search the user's second brain for past decisions, project notes, architecture docs, or general knowledge.\n"
-        "   - `remember_in_brain`: Save valuable notes, decisions, or durable context into the brain vault.\n"
+        "   - `search_brain`: Search the user's second brain for past decisions, project notes, "
+        "architecture docs, or general knowledge.\n"
+        "   - `remember_in_brain`: Save valuable notes, decisions, or durable context into vault.\n"
         "   - `get_brain_health`: Check Exocortex system health (Vault, Gateway, Neo4j).\n"
         "   - `get_workflow`: Inspect specific saved workflows or operational procedures by ID.\n"
         "3. Antigravity Worker (`call_antigravity_worker`):\n"
-        "   - Executes autonomous engineering tasks, coding, refactors, script executions, or workspace modifications on the host via `agy` (Antigravity CLI).\n"
-        "   - CRITICAL SECURITY / ACCESS CONTROL: This tool is STRICTLY RESERVED for authorized users. Never deny an authorized user when they ask to execute or implement code; immediately call `call_antigravity_worker` with the specified task and target_project. For any unauthorized user, access is strictly forbidden.\n\n"
+        "   - Executes autonomous engineering tasks, coding, refactors, script executions, or "
+        "workspace modifications on host via `agy` (Antigravity CLI).\n"
+        "   - CRITICAL SECURITY / ACCESS CONTROL: This tool is STRICTLY RESERVED for authorized "
+        "users. Never deny an authorized user when they ask to execute or implement code; "
+        "immediately call `call_antigravity_worker` with specified task and target_project. "
+        "For unauthorized users, access is strictly forbidden.\n\n"
         "SPECIALIZED COMMANDS:\n"
         "- If the user wants to connect Garmin, they should use /garmin_login.\n"
         "- If the user wants to force a data sync, they should use /garmin_sync.\n"
         "You can inform the user about these commands if they seem lost.\n\n"
         "LANGUAGE POLICY:\n"
-        "Always respond in the same language the user is speaking. If the user asks in English, respond in English. "
-        "If the user asks in Spanish, respond in Spanish. This is mandatory.\n\n"
+        "Always respond in the same language the user is speaking. If the user asks in English, "
+        "respond in English. If the user asks in Spanish, respond in Spanish. This is mandatory.\n\n"
         "IMPORTANT FORMATTING RULES for Telegram (Chat Interface):\n"
         "1. DO NOT use Markdown tables. Use bulleted lists instead.\n"
-        "2. VERTICAL SPACING: Use double newlines (two '\\n') between list items and between different sections "
+        "2. VERTICAL SPACING: Use double newlines (two '\\n') between list items and sections "
         "to ensure good readability on mobile screens.\n"
         "3. Every item in a schedule or list MUST be on its own line with a blank line between items.\n"
         "4. Use **bold** for emphasis and emojis to keep the tone friendly.\n"
@@ -608,6 +609,7 @@ class MessageProcessor:
         return text.strip()
 
 
+@app.get("/")
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -627,7 +629,7 @@ class RegisterPayload(BaseModel):
 @app.post("/api/users/register")
 async def register(payload: RegisterPayload):
     """Registers a new user."""
-    from db import CANONICAL_USERS, CANONICAL_ALIASES, get_platform_id
+    from db import CANONICAL_ALIASES, CANONICAL_USERS, get_platform_id
 
     # Check canonical mappings first
     if payload.telegram_id in CANONICAL_USERS:
