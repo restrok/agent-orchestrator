@@ -288,8 +288,15 @@ async def call_antigravity_worker(
         stdout_str = stdout.decode("utf-8", errors="replace").strip()
         stderr_str = stderr.decode("utf-8", errors="replace").strip()
 
-        if len(stdout_str) > 3500:
-            stdout_str = "..." + stdout_str[-3500:]
+        # Protect against runaway terminal output (e.g. infinite dumps) while allowing full reports
+        max_output_len = 50000
+        if len(stdout_str) > max_output_len:
+            omitted = len(stdout_str) - max_output_len
+            stdout_str = (
+                stdout_str[:35000]
+                + f"\n\n... [Truncado: {omitted} caracteres omitidos por tamaño] ...\n\n"
+                + stdout_str[-15000:]
+            )
 
         if proc.returncode == 0:
             return f"✅ Tarea de Antigravity completada con éxito:\n\n{stdout_str}"
