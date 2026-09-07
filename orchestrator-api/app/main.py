@@ -243,15 +243,22 @@ async def call_antigravity_worker(
 
     logger.info(f"🚀 Lanzando Antigravity Worker para {user_id}: {task} en {target_project}")
 
-    clean_project = target_project.strip()
-    workspace_dir = clean_project if clean_project.startswith("/") else f"/home/{HOST_SSH_USER}/{clean_project}"
+    clean_project = target_project.strip().lstrip("~").lstrip("/")
+    if clean_project and clean_project not in (".", "home", "root"):
+        workspace_dir = f"/home/{HOST_SSH_USER}/{clean_project}"
+    else:
+        workspace_dir = f"/home/{HOST_SSH_USER}"
 
     key_path = SSH_KEY_PATH
     if not Path(key_path).exists() and Path("/root/.ssh/id_rsa").exists():
         key_path = "/root/.ssh/id_rsa"
 
     cmd_flags = "--dangerously-skip-permissions --print-timeout 15m"
-    remote_cmd = f"cd {shlex.quote(workspace_dir)} && agy {cmd_flags} -p {shlex.quote(task)}"
+    remote_cmd = (
+        f'export PATH="/home/{HOST_SSH_USER}/.local/bin:/usr/local/bin:$PATH" && '
+        f"if [ -d {shlex.quote(workspace_dir)} ]; then cd {shlex.quote(workspace_dir)}; "
+        f"else cd /home/{HOST_SSH_USER}; fi && agy {cmd_flags} -p {shlex.quote(task)}"
+    )
     ssh_cmd = [
         "ssh",
         "-i",
