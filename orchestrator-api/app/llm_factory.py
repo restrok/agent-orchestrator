@@ -25,7 +25,10 @@ def get_chat_model(model_name: str, temperature: float = 0, **kwargs):
             from langchain_google_genai import ChatGoogleGenerativeAI
 
             return ChatGoogleGenerativeAI(
-                model=model_name, google_api_key=os.getenv("GOOGLE_API_KEY"), temperature=temperature, **kwargs
+                model=model_name,
+                google_api_key=os.getenv("GOOGLE_API_KEY") or "dummy-key-for-tests",
+                temperature=temperature,
+                **kwargs,
             )
     elif provider == "lmstudio":
         from langchain_openai import ChatOpenAI
@@ -70,5 +73,8 @@ def get_chat_model(model_name: str, temperature: float = 0, **kwargs):
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     return ChatGoogleGenerativeAI(
-        model=model_name, google_api_key=os.getenv("GOOGLE_API_KEY"), temperature=temperature, **kwargs
+        model=model_name,
+        google_api_key=os.getenv("GOOGLE_API_KEY") or "dummy-key-for-tests",
+        temperature=temperature,
+        **kwargs,
     )
