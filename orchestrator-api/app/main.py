@@ -90,7 +90,7 @@ ALLOWED_WORKER_USERS = [u.strip().lower() for u in os.getenv("ALLOWED_WORKER_USE
 init_db()
 
 genai.configure(api_key=GOOGLE_API_KEY)
-model_name = os.getenv("LLM_MODEL", "gemini-1.5-flash")
+model_name = os.getenv("LLM_MODEL", "gemini-2.5-flash")
 
 # --- Scheduler Setup ---
 DB_PATH = Path(__file__).parent / "data" / "orchestrator.db"
@@ -996,7 +996,7 @@ async def chat_stream(
             # 1. Audios / Notas de voz
             if "audio" in mime_type or filename.endswith((".ogg", ".mp3", ".m4a", ".wav")):
                 uploaded_file = genai.upload_file(path=str(temp_file), mime_type=mime_type)
-                transcription_model = genai.GenerativeModel("gemini-1.5-flash")
+                transcription_model = genai.GenerativeModel("gemini-2.5-flash")
                 response = transcription_model.generate_content([
                     "Transcribe this voice note and explain user intent. Output ONLY the transcribed message or action.",
                     uploaded_file,
@@ -1008,7 +1008,7 @@ async def chat_stream(
             # 2. Imágenes / Fotos
             elif "image" in mime_type or filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
                 uploaded_file = genai.upload_file(path=str(temp_file), mime_type=mime_type)
-                vision_model = genai.GenerativeModel("gemini-1.5-flash")
+                vision_model = genai.GenerativeModel("gemini-2.5-flash")
                 response = vision_model.generate_content([
                     "Analyze this image thoroughly. Describe what is shown, extract any visible text, errors, diagrams, or details relevant to homelab, programming, workouts, or general tasks.",
                     uploaded_file,
@@ -1023,7 +1023,7 @@ async def chat_stream(
 
             elif filename.endswith(".pdf"):
                 uploaded_file = genai.upload_file(path=str(temp_file), mime_type="application/pdf")
-                doc_model = genai.GenerativeModel("gemini-1.5-flash")
+                doc_model = genai.GenerativeModel("gemini-2.5-flash")
                 response = doc_model.generate_content([
                     "Extract and summarize the essential text and structure from this PDF document.",
                     uploaded_file,
