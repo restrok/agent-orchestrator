@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-09-12
+
+### Added
+- **Dedicated Local Whisper ASR Container:** Integrated `onerahmet/openai-whisper-asr-webservice:latest` running `faster-whisper` (`small` model) in `docker-compose.yml`. Transcribes voice notes locally with sub-second response times and zero cloud egress.
+- **Multimodal Gateway & Orchestrator:** Full support in `telegram-gateway` for photos (`filters.PHOTO`), voice notes & audio files (`filters.VOICE | filters.AUDIO`), and documents/code/logs (`filters.Document.ALL`).
+- **Persistent Task Scheduler (APScheduler):** Implemented `AsyncIOScheduler` with SQLite job store (`orchestrator.db`). Allows scheduling future reminders, proactive checks, and deferred worker tasks with 0 token consumption during wait periods.
+- **Deterministic Weather Tool:** Added `get_weather_forecast` via Open-Meteo API for Tigre/Buenos Aires without requiring external API keys.
+- **Exocortex Brain Proactive Intents:** Integrated tools `register_intent_in_brain`, `get_intent_from_brain`, and `update_intent_in_brain` to persist proactive tasks into the Exocortex long-term memory system.
+- **Multi-Worker Orchestration (Sync & Async):** Support for fast synchronous tools and long-running asynchronous subagents with automated 45-second progress updates sent directly to Telegram.
+- **Human-in-the-Loop (HITL) Security:** Non-admin requests (e.g. Mercedes) that trigger system actions generate an approval plan (`plan_<id>`) and send interactive Telegram inline buttons (`Aprobar` / `Rechazar`) to the administrator (`fsirio`).
+
+### Changed
+- **Primary Orchestrator LLM:** Switched model to `deepseek-v4.1-flash` via Ollama Cloud API.
+- **Audio Processing Pipeline:** Routed all incoming Telegram voice notes to local Whisper ASR at `http://whisper:9000/asr`, with graceful fallback to Gemini if local Whisper is unreachable.
+
 ## [1.3.0] - 2026-05-15
 
 ### Added
@@ -37,17 +52,3 @@ All notable changes to this project will be documented in this file.
 - **Detailed Tool Logging:** The Orchestrator now logs the exact query sent to Expert Agents for better transparency and debugging.
 - **MarkdownV2 Support:** Enhanced Telegram Gateway to support MarkdownV2, enabling rich text formatting (bold, italics, lists).
 - **Graceful Fallbacks:** Added error handling for malformed Markdown to ensure messages are still delivered as plain text.
-
-### Changed
-- **Routing Reliability:** Implemented `InjectedState` in the Orchestrator to prevent LLM hallucinations of user IDs. Routing now uses validated platform IDs.
-- **Increased Timeouts:** Adjusted request timeouts (Orchestrator: 120s, Gateway: 150s) to accommodate slow reasoning or data retrieval from Expert Agents.
-- **Agnostic Supervisor:** Refactored the Supervisor's system prompt to be task-neutral while enforcing strict Telegram-friendly formatting (no tables, double line-breaks for readability).
-
-### Fixed
-- **State Persistence:** Added `add_messages` reducer to the LangGraph state to prevent message history from being overwritten during tool-calling cycles.
-- **Crash Fix:** Resolved a `ValueError: contents are required` in the Google GenAI SDK caused by broken message sequences in the state.
-
-## [1.0.0] - 2026-05-01
-- Initial release of the Hub-and-Spoke Agent Orchestrator.
-- Basic LangGraph implementation with Biometric Expert integration.
-- Telegram Gateway with voice and text support.

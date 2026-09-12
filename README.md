@@ -1,98 +1,93 @@
 # Agent Orchestrator
 
-A modular, scalable **Swarm Architecture** agentic system designed to coordinate multiple specialized Expert Agents through decentralized handoffs. Built with **LangGraph**, **FastAPI**, and **python-telegram-bot**.
+A modular, scalable **Swarm Architecture** agentic system designed to coordinate multiple specialized Expert Agents through decentralized handoffs. Built with **LangGraph**, **FastAPI**, **python-telegram-bot**, **Faster-Whisper ASR**, and **APScheduler**.
 
 ## 🚀 Overview
 
-The **Agent Orchestrator** acts as the high-speed router of a multi-agent ecosystem. Instead of a single monolithic bot or a strictly centralized supervisor, this project implements an **Agent-to-Agent (A2A)** protocol where an Intent Router analyzes user requests and immediately hands them off to specialized "Expert Agents" (e.g., Biometric Coach, Finance Expert).
+The **Agent Orchestrator** acts as the high-speed router of a multi-agent ecosystem in the homelab. Instead of a single monolithic bot or a strictly centralized supervisor, this project implements an **Agent-to-Agent (A2A)** protocol where an Intent Router analyzes user requests and immediately hands them off to specialized "Expert Agents" (e.g., Biometric Coach, Finance Expert) or orchestrates local Autonomous Workers.
 
 ### Key Features
-- **Swarm Architecture:** Decentralized handoffs to specialized expert nodes.
-- **Intent-Based Routing:** Automated delegation based on structured LLM classification.
-- **Loop Prevention:** Robust state management to detect and halt infinite agent cycles.
-- **Proactive Notifications:** Support for asynchronous, agent-initiated alerts pushed via the Orchestrator to Telegram.
-- **Stateful Orchestration:** Powered by LangGraph for complex, multi-turn interactions with persistence.
+- **Swarm Architecture:** Decentralized handoffs to specialized expert nodes and autonomous background workers.
+- **Local Speech-to-Text (Whisper ASR):** 100% private, on-premise voice note and audio transcription using a dedicated `faster-whisper` container (`whisper-small` engine) with multi-language auto-detection (Spanish Rioplatense & English). Zero cloud egress for voice notes.
+- **Full Multimodal Intake:** Native Telegram support for voice notes (`.ogg`, `.mp3`), high-res photos (`.jpg`, `.png`), documents, logs, and code files (`.py`, `.pdf`, `.sh`, `.yml`).
+- **Persistent Task Scheduler:** Powered by `APScheduler` with SQLite job store (`orchestrator.db`). Supports scheduled weather forecasts, reminders, and proactive evaluation without idle token burn (0 tokens while waiting).
+- **Exocortex Brain MCP Integration:** Durable intent persistence (`register_intent_in_brain`, `get_intent_from_brain`, `update_intent_in_brain`) connected directly to the Exocortex long-term memory system.
+- **Multi-Worker Orchestration (Sync & Async):** Fast synchronous tool-calls or long-running asynchronous subagents with periodic 45-second progress heartbeats sent to Telegram.
+- **Human-in-the-Loop (HITL) Security:** Strict role-based execution (RBAC). Work requests from unprivileged users automatically generate an interactive approval plan with inline Telegram buttons for the admin (`fsirio`).
+- **Intent-Based Routing:** Automated delegation powered by `deepseek-v4.1-flash` via Ollama Cloud.
+- **Proactive Notifications:** Support for asynchronous, agent-initiated alerts pushed via the Orchestrator to Telegram (`POST /api/notify`).
 - **SSE Streaming:** Real-time response delivery to the Telegram Gateway.
-- **Secure A2A Routing:** Uses `X-User-ID` injection for cross-agent data privacy.
 
-## 📸 Screenshots
+## 🏗️ Architecture & Services
 
-### 🧠 Supervisor Reasoning
-The Orchestrator analyzes user intent and decides which expert to call.
-![Orchestrator Reasoning](assets/orchestrator-logs.png)
+The system runs as a multi-container Docker Compose stack connected to `shared_internal_network`:
 
----
+```
+                           +------------------------+
+                           |    Telegram Gateway    |
+                           |  (python-telegram-bot) |
+                           +-----------+------------+
+                                       |
+                   HTTP / SSE Streaming| (Photos, Audio, Docs, Commands)
+                                       v
+                           +------------------------+
+                           |    Orchestrator API    |
+                           | (FastAPI + LangGraph)  |
+                           +-----+------------+-----+
+                                 |            |
+         +-----------------------+            +-----------------------+
+         | Internal HTTP                      | Internal HTTP         |
+         v                                    v                       v
++------------------+                 +------------------+    +------------------+
+| Local Whisper ASR|                 |  External Agents |    | Exocortex Brain  |
+| (faster-whisper) |                 | (Biometric Coach)|    |   (MCP Tools)    |
++------------------+                 +------------------+    +------------------+
+```
 
-### 🩺 Biometric Expert Insights
-Detailed analysis from specialized agents based on user data.
-![Biometric Expert](assets/coach-agent-logs.png)
-
----
-
-### 📱 Mobile-Friendly Formatting
-Clean, readable responses optimized for the Telegram interface.
-![Telegram Formatting](assets/bot-reply.png)
-
-## 🏗️ Architecture
-
-1.  **Telegram Gateway:** A lightweight proxy that handles user authentication, multimodal intake (text/voice), and renders responses with Telegram-optimized formatting.
-2.  **Orchestrator API:** The core service that runs the LangGraph supervisor. It manages conversation state, tool calling, and synthesizes expert data into human-friendly responses.
-3.  **Proactive Hook:** A specialized endpoint (`POST /api/notify`) that allows external expert agents to push high-signal alerts directly to users without a prior request.
-4.  **Expert Agents (External):** Specialized microservices that provide specific data or perform actions. The orchestrator treats these as "black boxes" via a standardized API.
+1. **Telegram Gateway (`agent-orchestrator-gateway`):** Lightweight proxy handling Telegram polling, photo/document/voice downloads, user mapping, and interactive inline keyboard callbacks.
+2. **Orchestrator API (`agent-orchestrator-api`):** Core FastAPI application running the LangGraph state machine, APScheduler, worker dispatchers, and tool registry.
+3. **Whisper ASR (`agent-orchestrator-whisper`):** Dedicated microservice exposing standard transcription endpoints for voice notes, running optimized CTranslate2 / faster-whisper.
 
 ## 🛠️ Tech Stack
 - **Language:** Python 3.10+
 - **Orchestration:** [LangGraph](https://github.com/langchain-ai/langgraph)
-- **LLM:** Google Gemma 4 (via LangChain Google GenAI)
-- **API Framework:** FastAPI
-- **CI/CD:** GitHub Actions (Multi-arch Docker builds)
-- **Interface:** [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot)
-- **Streaming:** Server-Sent Events (SSE)
+- **Primary LLM:** DeepSeek V4.1 Flash (via Ollama Cloud API)
+- **Speech-to-Text:** Faster-Whisper (`onerahmet/openai-whisper-asr-webservice`)
+- **Scheduler:** APScheduler (AsyncIO + SQLite SQLAlchemyJobStore)
+- **API Framework:** FastAPI & Uvicorn
+- **Telegram Interface:** [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) (v21+)
+- **Storage:** SQLite (`orchestrator.db`) for schedules, plans, and chat history
 
 ## 🚦 Getting Started
 
 ### Prerequisites
-- Python 3.10 or higher.
-- A Google AI (Gemini/Gemma) API Key.
-- A Telegram Bot Token (from @BotFather).
+- Docker & Docker Compose.
+- Ollama Cloud / API access (`OLLAMA_API_KEY`).
+- Telegram Bot Token (from `@BotFather`).
 
-### Installation (Docker - Recommended)
+### Deployment (Docker Compose)
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
-### Installation (Local)
+### Environment Configuration
 
-1. **Clone the repository:**
-   ```bash
-   git clone git@github.com:restrok/agent-orchestrator.git
-   cd agent-orchestrator
-   ```
+#### `orchestrator-api/.env`
+```env
+OLLAMA_BASE_URL=https://ollama.com
+OLLAMA_API_KEY=your_ollama_key
+ORCHESTRATOR_MODEL=deepseek-v4.1-flash
+WHISPER_API_URL=http://whisper:9000
+DATABASE_URL=sqlite:////app/data/orchestrator.db
+```
 
-2. **Setup the Orchestrator:**
-   ```bash
-   cd orchestrator-api
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   cp .env.example .env  # Update with your GOOGLE_API_KEY
-   python -m app.main
-   ```
-
-3. **Setup the Telegram Gateway:**
-   ```bash
-   cd ../telegram-gateway
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   cp .env.example .env  # Update with your TELEGRAM_BOT_TOKEN and API_URL
-   python main.py
-   ```
-
-## 📝 Configuration
-
-The system uses a `config.json` in the gateway to map Telegram User IDs to platform-specific usernames. This ensures that expert agents receive a consistent user identity regardless of the platform.
+#### `telegram-gateway/.env`
+```env
+TELEGRAM_BOT_TOKEN=your_bot_token
+API_URL=http://orchestrator:8001
+ADMIN_USER_ID=963420066
+```
 
 ## 📄 License
 This project is open-source and available under the MIT License.
