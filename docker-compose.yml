@@ -1,6 +1,17 @@
 version: '3.8'
 
 services:
+  whisper:
+    image: onerahmet/openai-whisper-asr-webservice:latest
+    container_name: agent-orchestrator-whisper
+    environment:
+      - ASR_MODEL=small
+      - ASR_ENGINE=faster_whisper
+    networks:
+      - default
+      - shared_internal_network
+    restart: unless-stopped
+
   orchestrator:
     build:
       context: ./orchestrator-api
@@ -8,15 +19,17 @@ services:
     image: ghcr.io/restrok/agent-orchestrator/orchestrator-api:latest
     container_name: agent-orchestrator-api
     ports:
-      - "8001:8001"
+      -  8001:8001
     env_file:
       - ./orchestrator-api/.env
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - host.docker.internal:host-gateway
     volumes:
       - ./orchestrator-api/app:/app
       - orchestrator_data:/app/data
     command: uvicorn main:app --host 0.0.0.0 --port 8001
+    depends_on:
+      - whisper
     networks:
       - default
       - shared_internal_network

@@ -993,17 +993,45 @@ async def chat_stream(
             f.write(content)
 
         try:
-            # 1. Audios / Notas de voz
+            # 1. Audios / Notas de voz (Local Whisper ASR + Fallback)
             if "audio" in mime_type or filename.endswith((".ogg", ".mp3", ".m4a", ".wav")):
-                uploaded_file = genai.upload_file(path=str(temp_file), mime_type=mime_type)
-                transcription_model = genai.GenerativeModel("gemini-2.5-flash")
-                response = transcription_model.generate_content([
-                    "Transcribe this voice note and explain user intent. Output ONLY the transcribed message or action.",
-                    uploaded_file,
-                ])
-                transcribed = response.text.strip()
-                logger.info(f"Transcribed audio: {transcribed}")
-                text = f"{text or ''}\n{transcribed}".strip()
+                transcribed = ""
+                whisper_url = os.getenv("WHISPER_API_URL", "http://whisper:9000")
+                try:
+                    logger.info(f"Transcribing audio with local Whisper ASR at {whisper_url}...")
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        with open(temp_file, "rb") as af:
+                            files = {"audio_file": (filename, af, mime_type or "audio/ogg")}
+                            resp = await client.post(
+                                f"{whisper_url}/asr",
+                                params={"task": "transcribe", "output": "json"},
+                                files=files
+                            )
+                            if resp.status_code == 200:
+                                res_json = resp.json()
+                                transcribed = res_json.get("text", "").strip()
+                                logger.info(f"Whisper transcribed successfully: {transcribed}")
+                            else:
+                                logger.error(f"Whisper ASR returned {resp.status_code}: {resp.text}")
+                except Exception as e:
+                    logger.warning(f"Local Whisper transcription error: {e}. Attempting fallback...")
+
+                # Fallback to Gemini if Whisper failed or was unavailable
+                if not transcribed and os.getenv("GEMINI_API_KEY"):
+                    try:
+                        uploaded_file = genai.upload_file(path=str(temp_file), mime_type=mime_type)
+                        transcription_model = genai.GenerativeModel("gemini-2.5-flash")
+                        response = transcription_model.generate_content([
+                            "Transcribe this voice note and explain user intent. Output ONLY the transcribed message or action.",
+                            uploaded_file,
+                        ])
+                        transcribed = response.text.strip()
+                        logger.info(f"Gemini fallback transcribed: {transcribed}")
+                    except Exception as fallback_err:
+                        logger.error(f"Gemini fallback failed: {fallback_err}")
+
+                if transcribed:
+                    text = f"{text or ''}\n{transcribed}".strip()
 
             # 2. Imágenes / Fotos
             elif "image" in mime_type or filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
