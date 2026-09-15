@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.5.0] - 2026-09-12
+## [0.2.0] - 2026-09-15
 
 ### Added
 - **Dedicated Local Whisper ASR Container:** Integrated `onerahmet/openai-whisper-asr-webservice:latest` running `faster-whisper` (`small` model) in `docker-compose.yml`. Transcribes voice notes locally with sub-second response times and zero cloud egress.
