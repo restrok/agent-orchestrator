@@ -63,7 +63,7 @@ class MessageProcessor:
                         split_len = 0
 
             chunks.append(text[:split_at].strip())
-            text = text[split_at + split_len:].strip()
+            text = text[split_at + split_len :].strip()
 
         return chunks
 
@@ -79,11 +79,25 @@ class MessageProcessor:
         in_table = False
 
         emojis = {
-            "heart": "❤️", "hr": "❤️", "bpm": "❤️", "frecuencia": "❤️",
-            "distance": "📍", "distancia": "📍", "pace": "⏱️", "ritmo": "⏱️",
-            "power": "⚡", "potencia": "⚡", "time": "🕒", "tiempo": "🕒",
-            "duración": "🕒", "calories": "🔥", "calorías": "🔥", "vo2": "📈",
-            "sleep": "😴", "sueño": "😴", "hrv": "⚖️",
+            "heart": "❤️",
+            "hr": "❤️",
+            "bpm": "❤️",
+            "frecuencia": "❤️",
+            "distance": "📍",
+            "distancia": "📍",
+            "pace": "⏱️",
+            "ritmo": "⏱️",
+            "power": "⚡",
+            "potencia": "⚡",
+            "time": "🕒",
+            "tiempo": "🕒",
+            "duración": "🕒",
+            "calories": "🔥",
+            "calorías": "🔥",
+            "vo2": "📈",
+            "sleep": "😴",
+            "sueño": "😴",
+            "hrv": "⚖️",
         }
 
         for line in lines:
@@ -254,7 +268,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_bytes = await file_obj.download_as_bytearray()
 
     caption = update.message.caption or ""
-    await process_request(update, context, text=caption, file_bytes=file_bytes, file_name="photo.jpg", file_mime="image/jpeg")
+    await process_request(
+        update, context, text=caption, file_bytes=file_bytes, file_name="photo.jpg", file_mime="image/jpeg"
+    )
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -297,7 +313,9 @@ async def handle_callback_query(update: Update, _context: ContextTypes.DEFAULT_T
                 )
                 if res.status_code == 200:
                     if act_name == "approve":
-                        await query.edit_message_text(f"✅ <b>Plan {plan_id} Aprobado</b>. La ejecución ha comenzado.", parse_mode=ParseMode.HTML)
+                        await query.edit_message_text(
+                            f"✅ <b>Plan {plan_id} Aprobado</b>. La ejecución ha comenzado.", parse_mode=ParseMode.HTML
+                        )
                     else:
                         await query.edit_message_text(f"❌ <b>Plan {plan_id} Rechazado</b>.", parse_mode=ParseMode.HTML)
                 else:
@@ -328,7 +346,9 @@ async def process_request(
             platform_user_id = USER_MAPPING.get(telegram_user_id)
 
     if not platform_user_id:
-        raw_username = update.message.from_user.username or update.message.from_user.first_name or f"user_{telegram_user_id}"
+        raw_username = (
+            update.message.from_user.username or update.message.from_user.first_name or f"user_{telegram_user_id}"
+        )
         platform_user_id = await register_new_user(telegram_user_id, raw_username)
         if not platform_user_id:
             await update.message.reply_text("Error registrando usuario. Intenta más tarde.")
@@ -353,7 +373,9 @@ async def process_request(
             full_response = ""
             last_update_time = 0
 
-            async with client.stream("POST", stream_url, data=data, files=files, headers=headers, timeout=900.0) as response:
+            async with client.stream(
+                "POST", stream_url, data=data, files=files, headers=headers, timeout=900.0
+            ) as response:
                 if response.status_code != 200:
                     error_text = await response.aread()
                     logging.error(f"API Error: {response.status_code} - {error_text.decode()}")
@@ -373,7 +395,9 @@ async def process_request(
                                 current_time = asyncio.get_event_loop().time()
                                 if current_time - last_update_time > 1.5:
                                     with contextlib.suppress(Exception):
-                                        await thinking_message.edit_text(f"⏳ <i>{status_msg}</i>", parse_mode=ParseMode.HTML)
+                                        await thinking_message.edit_text(
+                                            f"⏳ <i>{status_msg}</i>", parse_mode=ParseMode.HTML
+                                        )
                                     last_update_time = current_time
                                 continue
 
@@ -384,7 +408,9 @@ async def process_request(
                             if current_time - last_update_time > 1.0 and full_response.strip():
                                 formatted_partial = MessageProcessor.decode(full_response)
                                 with contextlib.suppress(Exception):
-                                    await thinking_message.edit_text(formatted_partial + "...", parse_mode=ParseMode.HTML)
+                                    await thinking_message.edit_text(
+                                        formatted_partial + "...", parse_mode=ParseMode.HTML
+                                    )
                                 last_update_time = current_time
                         except json.JSONDecodeError:
                             continue
