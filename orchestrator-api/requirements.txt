@@ -8,3 +8,5 @@ python-dotenv
 pydantic
 python-multipart
 langchain-openai
+apscheduler
+sqlalchemy

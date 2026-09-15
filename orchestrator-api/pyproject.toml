@@ -15,6 +15,8 @@ dependencies = [
     "pydantic>=2.6.0",
     "python-multipart>=0.0.7",
     "langchain-openai>=1.2.2",
+    "apscheduler>=3.11.3",
+    "sqlalchemy>=2.0.53",
 ]
 
 [dependency-groups]
@@ -35,6 +37,7 @@ ignore = [
     "B008", # Allow FastAPI Depends
     "E402", # Allow imports after environment setup
     "T201", # Allow print in CLI/scripts
+    "E501", # Allow long lines
 ]
 
 [tool.pytest.ini_options]
