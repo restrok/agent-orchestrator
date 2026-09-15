@@ -169,13 +169,25 @@ def get_telegram_id(platform_user_id: str):
 
 # --- Approval Plans DB Helpers ---
 
-def create_approval_plan(plan_id: str, requester_id: str, requester_telegram_id: str, title: str, plan_details: str, task: str, target_project: str):
+
+def create_approval_plan(
+    plan_id: str,
+    requester_id: str,
+    requester_telegram_id: str,
+    title: str,
+    plan_details: str,
+    task: str,
+    target_project: str,
+):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO approval_plans (id, requester_id, requester_telegram_id, title, plan_details, task, target_project, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-    """, (plan_id, requester_id, requester_telegram_id, title, plan_details, task, target_project))
+    """,
+        (plan_id, requester_id, requester_telegram_id, title, plan_details, task, target_project),
+    )
     conn.commit()
     conn.close()
 
@@ -193,20 +205,26 @@ def get_approval_plan(plan_id: str) -> dict[str, Any] | None:
 def update_approval_plan_status(plan_id: str, status: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("UPDATE approval_plans SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?", (status, plan_id))
+    cursor.execute(
+        "UPDATE approval_plans SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?", (status, plan_id)
+    )
     conn.commit()
     conn.close()
 
 
 # --- Background Workers DB Helpers ---
 
+
 def register_background_worker(worker_id: str, user_id: str, chat_id: str, task: str, target_project: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO background_workers (id, user_id, chat_id, task, target_project, status)
         VALUES (?, ?, ?, ?, ?, 'running')
-    """, (worker_id, user_id, chat_id, task, target_project))
+    """,
+        (worker_id, user_id, chat_id, task, target_project),
+    )
     conn.commit()
     conn.close()
 
@@ -222,24 +240,41 @@ def update_background_worker_progress(worker_id: str, last_status_msg: str):
 def complete_background_worker(worker_id: str, status: str, result: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        """
         UPDATE background_workers 
         SET status = ?, result = ?, finished_at = CURRENT_TIMESTAMP 
         WHERE id = ?
-    """, (status, result, worker_id))
+    """,
+        (status, result, worker_id),
+    )
     conn.commit()
     conn.close()
 
 
 # --- Scheduled Tasks DB Helpers ---
 
-def register_scheduled_task(task_id: str, job_id: str, intent_id: str | None, user_id: str, chat_id: str, title: str, task_type: str, payload: dict, trigger_time: str):
+
+def register_scheduled_task(
+    task_id: str,
+    job_id: str,
+    intent_id: str | None,
+    user_id: str,
+    chat_id: str,
+    title: str,
+    task_type: str,
+    payload: dict,
+    trigger_time: str,
+):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO scheduled_tasks (id, job_id, intent_id, user_id, chat_id, title, task_type, payload, trigger_time, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled')
-    """, (task_id, job_id, intent_id, user_id, chat_id, title, task_type, json.dumps(payload), trigger_time))
+    """,
+        (task_id, job_id, intent_id, user_id, chat_id, title, task_type, json.dumps(payload), trigger_time),
+    )
     conn.commit()
     conn.close()
 

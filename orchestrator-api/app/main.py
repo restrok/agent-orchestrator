@@ -7,9 +7,9 @@ import os
 import re
 import shlex
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import google.generativeai as genai
 import httpx
@@ -94,9 +94,7 @@ model_name = os.getenv("LLM_MODEL", "gemini-2.5-flash")
 
 # --- Scheduler Setup ---
 DB_PATH = Path(__file__).parent / "data" / "orchestrator.db"
-jobstores = {
-    "default": SQLAlchemyJobStore(url=f"sqlite:///{DB_PATH.resolve()}")
-}
+jobstores = {"default": SQLAlchemyJobStore(url=f"sqlite:///{DB_PATH.resolve()}")}
 scheduler = AsyncIOScheduler(jobstores=jobstores, timezone="America/Argentina/Buenos_Aires")
 
 app = FastAPI(title="Telegram Agent Orchestrator")
@@ -122,7 +120,9 @@ async def shutdown_event():
 
 
 # --- Notification Helper ---
-async def send_telegram_notification(target_user: str, message: str, inline_keyboard: list[list[dict]] | None = None) -> bool:
+async def send_telegram_notification(
+    target_user: str, message: str, inline_keyboard: list[list[dict]] | None = None
+) -> bool:
     """Envía notificación directa por Telegram a un usuario."""
     chat_id = get_telegram_id(target_user)
     if not chat_id:
@@ -211,11 +211,12 @@ async def _invoke_mcp_tool(tool_name: str, arguments: dict) -> str:
 
 # --- Tools ---
 
+
 @tool
 async def call_biometric_expert(
     query: str,
     user_id: Annotated[str, InjectedState("user_id")],
-    thread_id: Annotated[str, InjectedState("thread_id")],
+    _thread_id: Annotated[str, InjectedState("thread_id")],
 ):
     """Calls the Biometric Expert Agent to get health, Garmin, or profile data."""
     try:
@@ -241,6 +242,7 @@ async def call_biometric_expert(
 
 
 # --- Exocortex Brain Tools ---
+
 
 @tool
 async def search_brain(query: str, space_id: str = "work", limit: int = 5) -> str:
@@ -298,14 +300,18 @@ async def get_intent_from_brain(intent_id: str) -> str:
 @tool
 async def update_intent_in_brain(intent_id: str, status: str, context_data: dict | None = None) -> str:
     """Actualiza el estado de una intención en el Brain ('active', 'notified', 'dismissed', 'expired')."""
-    return await _invoke_mcp_tool("brain_update_intent_status", {
-        "intent_id": intent_id,
-        "status": status,
-        "context_data": context_data or {},
-    })
+    return await _invoke_mcp_tool(
+        "brain_update_intent_status",
+        {
+            "intent_id": intent_id,
+            "status": status,
+            "context_data": context_data or {},
+        },
+    )
 
 
 # --- Weather Tool (Open-Meteo) ---
+
 
 @tool
 async def get_weather_forecast(location: str = "Tigre, Buenos Aires", days: int = 3) -> str:
@@ -346,12 +352,17 @@ async def get_weather_forecast(location: str = "Tigre, Buenos Aires", days: int 
 
 # --- Scheduled Tasks Engine Handler ---
 
-async def execute_scheduled_job(job_id: str, task_type: str, user_id: str, chat_id: str, title: str, payload: dict, intent_id: str | None = None):
+
+async def execute_scheduled_job(
+    job_id: str, task_type: str, user_id: str, chat_id: str, title: str, payload: dict, intent_id: str | None = None
+):
     """Ejecutor disparado por APScheduler cuando llega el trigger_time."""
     logger.info(f"⏰ Ejecutando tarea programada [{job_id}] para {user_id}: {title} ({task_type})")
 
     if task_type == "weather_check":
-        forecast = await get_weather_forecast.ainvoke({"location": payload.get("location", "Tigre, Buenos Aires"), "days": 3})
+        forecast = await get_weather_forecast.ainvoke(
+            {"location": payload.get("location", "Tigre, Buenos Aires"), "days": 3}
+        )
         msg = f"🔔 <b>Alerta Programada: {html.escape(title)}</b>\n\n{forecast}\n\n<i>Evaluación automática completada con cero tokens en espera.</i>"
         inline_kb = [
             [
@@ -361,7 +372,9 @@ async def execute_scheduled_job(job_id: str, task_type: str, user_id: str, chat_
         ]
         await send_telegram_notification(user_id, msg, inline_keyboard=inline_kb)
         if intent_id:
-            await update_intent_in_brain.ainvoke({"intent_id": intent_id, "status": "notified", "context_data": {"forecast_snippet": forecast[:200]}})
+            await update_intent_in_brain.ainvoke(
+                {"intent_id": intent_id, "status": "notified", "context_data": {"forecast_snippet": forecast[:200]}}
+            )
 
     elif task_type == "reminder":
         rem_msg = payload.get("message", title)
@@ -376,12 +389,17 @@ async def execute_scheduled_job(job_id: str, task_type: str, user_id: str, chat_
         msg = f"🚀 <b>Ejecutando Tarea Programada de Worker</b>:\n\n<b>Tarea:</b> {html.escape(task_prompt)}\n<b>Proyecto:</b> {html.escape(target_project or 'default')}"
         await send_telegram_notification(user_id, msg)
         # Launch async worker
-        asyncio.create_task(run_background_worker_task(user_id=user_id, chat_id=chat_id, task=task_prompt, target_project=target_project))
+        asyncio.create_task(
+            run_background_worker_task(
+                user_id=user_id, chat_id=chat_id, task=task_prompt, target_project=target_project
+            )
+        )
 
     update_scheduled_task_status(job_id, "triggered")
 
 
 # --- Scheduling Tools ---
+
 
 @tool
 async def schedule_task(
@@ -398,7 +416,9 @@ async def schedule_task(
     try:
         trigger_dt = datetime.fromisoformat(trigger_time_iso)
     except Exception as e:
-        return f"Error en formato de fecha/hora: {e}. Debe ser ISO 8601 con zona horaria (ej: 2026-09-13T10:00:00-03:00)."
+        return (
+            f"Error en formato de fecha/hora: {e}. Debe ser ISO 8601 con zona horaria (ej: 2026-09-13T10:00:00-03:00)."
+        )
 
     job_id = f"job_{uuid.uuid4().hex[:10]}"
     task_id = f"task_{uuid.uuid4().hex[:10]}"
@@ -407,15 +427,17 @@ async def schedule_task(
     # If it's a weather check or preventive alert, register intent in Exocortex Brain
     if task_type in ("weather_check", "reminder"):
         try:
-            intent_res = await register_intent_in_brain.ainvoke({
-                "title": title,
-                "goal_description": json.dumps(payload),
-                "target_event_timestamp": trigger_time_iso,
-                "decision_horizon_hours": reminder_lead_hours,
-                "eval_tool_target": task_type,
-                "eval_params": payload,
-                "space_id": "personal",
-            })
+            intent_res = await register_intent_in_brain.ainvoke(
+                {
+                    "title": title,
+                    "goal_description": json.dumps(payload),
+                    "target_event_timestamp": trigger_time_iso,
+                    "decision_horizon_hours": reminder_lead_hours,
+                    "eval_tool_target": task_type,
+                    "eval_params": payload,
+                    "space_id": "personal",
+                }
+            )
             # Parse intent ID if available
             with contextlib.suppress(Exception):
                 intent_data = json.loads(intent_res)
@@ -424,7 +446,9 @@ async def schedule_task(
             logger.warning(f"Could not register intent in Brain: {e}")
 
     # Register in SQLite
-    register_scheduled_task(task_id, job_id, intent_id, user_id, str(thread_id), title, task_type, payload, trigger_time_iso)
+    register_scheduled_task(
+        task_id, job_id, intent_id, user_id, str(thread_id), title, task_type, payload, trigger_time_iso
+    )
 
     # Schedule in APScheduler
     scheduler.add_job(
@@ -448,24 +472,27 @@ async def list_scheduled_tasks() -> str:
         return "📅 No hay tareas programadas pendientes."
     lines = ["📅 **Tareas Programadas Activas**:"]
     for t in tasks:
-        lines.append(f"• **{t['title']}** (ID: `{t['job_id']}`)\n  ⏰ Fecha: {t['trigger_time']}\n  📌 Tipo: {t['task_type']}")
+        lines.append(
+            f"• **{t['title']}** (ID: `{t['job_id']}`)\n  ⏰ Fecha: {t['trigger_time']}\n  📌 Tipo: {t['task_type']}"
+        )
     return "\n\n".join(lines)
 
 
 @tool
 async def cancel_scheduled_task(job_id: str) -> str:
     """Cancela una tarea programada mediante su job_id."""
-    try:
+    with contextlib.suppress(Exception):
         scheduler.remove_job(job_id)
-    except Exception:
-        pass
     update_scheduled_task_status(job_id, "cancelled")
     return f"❌ Tarea `{job_id}` cancelada correctamente."
 
 
 # --- Multi-Worker Execution Logic ---
 
-async def run_ssh_worker_command(task: str, target_project: str, q: asyncio.Queue | None = None) -> tuple[int, str, str]:
+
+async def run_ssh_worker_command(
+    task: str, target_project: str, q: asyncio.Queue | None = None
+) -> tuple[int, str, str]:
     """Helper base para ejecutar el Antigravity Worker mediante SSH en el host."""
     clean_project = target_project.strip().lstrip("~").lstrip("/")
     if clean_project and clean_project not in (".", "home", "root"):
@@ -611,7 +638,9 @@ async def run_background_worker_task(user_id: str, chat_id: str, task: str, targ
         final_msg = f"✅ <b>Worker Completado con Éxito (`{worker_id}`)</b>:\n\n<b>Tarea:</b> {html.escape(task)}\n\n<b>Resultado:</b>\n{snippet}"
     else:
         complete_background_worker(worker_id, "failed", stderr_str or stdout_str)
-        final_msg = f"❌ <b>Worker Falló (`{worker_id}`)</b>:\n\n<b>Error:</b>\n{html.escape(stderr_str or stdout_str[:500])}"
+        final_msg = (
+            f"❌ <b>Worker Falló (`{worker_id}`)</b>:\n\n<b>Error:</b>\n{html.escape(stderr_str or stdout_str[:500])}"
+        )
 
     await send_telegram_notification(user_id, final_msg)
 
@@ -663,7 +692,11 @@ async def call_antigravity_worker(
 
     # Usuario Autorizado (fsirio)
     if mode == "async":
-        asyncio.create_task(run_background_worker_task(user_id=user_id, chat_id=str(thread_id), task=task, target_project=target_project))
+        asyncio.create_task(
+            run_background_worker_task(
+                user_id=user_id, chat_id=str(thread_id), task=task, target_project=target_project
+            )
+        )
         return (
             f"🚀 **Antigravity Worker lanzado en segundo plano (modo async)**.\n\n"
             f"• **Tarea:** {task}\n"
@@ -704,6 +737,7 @@ tool_node = ToolNode(tools)
 
 
 # --- LangGraph Setup ---
+
 
 async def node_router(state: AgentState):
     """Router determinista y clasificador de intenciones."""
@@ -810,7 +844,9 @@ workflow.add_node("supervisor", supervisor_node)
 workflow.add_node("tools", tool_node)
 
 workflow.add_edge(START, "router")
-workflow.add_conditional_edges("router", route_to_agent, {"biometric_expert": "biometric_expert", "supervisor": "supervisor"})
+workflow.add_conditional_edges(
+    "router", route_to_agent, {"biometric_expert": "biometric_expert", "supervisor": "supervisor"}
+)
 workflow.add_edge("biometric_expert", END)
 workflow.add_conditional_edges("supervisor", should_continue, {"tools": "tools", END: END})
 workflow.add_edge("tools", "supervisor")
@@ -830,11 +866,25 @@ class MessageProcessor:
         in_table = False
 
         emojis = {
-            "heart": "❤️", "hr": "❤️", "bpm": "❤️", "frecuencia": "❤️",
-            "distance": "📍", "distancia": "📍", "pace": "⏱️", "ritmo": "⏱️",
-            "power": "⚡", "potencia": "⚡", "time": "🕒", "tiempo": "🕒",
-            "duración": "🕒", "calories": "🔥", "calorías": "🔥", "vo2": "📈",
-            "sleep": "😴", "sueño": "😴", "hrv": "⚖️",
+            "heart": "❤️",
+            "hr": "❤️",
+            "bpm": "❤️",
+            "frecuencia": "❤️",
+            "distance": "📍",
+            "distancia": "📍",
+            "pace": "⏱️",
+            "ritmo": "⏱️",
+            "power": "⚡",
+            "potencia": "⚡",
+            "time": "🕒",
+            "tiempo": "🕒",
+            "duración": "🕒",
+            "calories": "🔥",
+            "calorías": "🔥",
+            "vo2": "📈",
+            "sleep": "😴",
+            "sueño": "😴",
+            "hrv": "⚖️",
         }
 
         for line in lines:
@@ -881,6 +931,7 @@ class MessageProcessor:
 
 # --- Endpoints ---
 
+
 @app.get("/")
 @app.get("/health")
 async def health():
@@ -900,6 +951,7 @@ class RegisterPayload(BaseModel):
 @app.post("/api/users/register")
 async def register(payload: RegisterPayload):
     from db import CANONICAL_ALIASES, CANONICAL_USERS, get_platform_id
+
     if payload.telegram_id in CANONICAL_USERS:
         platform_id = CANONICAL_USERS[payload.telegram_id]
         register_user(payload.telegram_id, platform_id)
@@ -930,7 +982,10 @@ class NotificationPayload(BaseModel):
 
 @app.post("/api/notify")
 async def notify(payload: NotificationPayload):
-    success = await send_telegram_notification(payload.user_id, f"🔔 <b>Notificación ({html.escape(payload.agent_id)})</b>:\n\n{MessageProcessor.decode(payload.message)}")
+    success = await send_telegram_notification(
+        payload.user_id,
+        f"🔔 <b>Notificación ({html.escape(payload.agent_id)})</b>:\n\n{MessageProcessor.decode(payload.message)}",
+    )
     return {"status": "success" if success else "error"}
 
 
@@ -948,24 +1003,33 @@ async def handle_plan_action(payload: ApprovalActionPayload):
         return JSONResponse({"status": "error", "message": "Plan no encontrado"}, status_code=404)
 
     if plan["status"] != "pending":
-        return JSONResponse({"status": "error", "message": f"El plan ya fue procesado ({plan['status']})"}, status_code=400)
+        return JSONResponse(
+            {"status": "error", "message": f"El plan ya fue procesado ({plan['status']})"}, status_code=400
+        )
 
     if payload.action == "reject":
         update_approval_plan_status(payload.plan_id, "rejected")
-        await send_telegram_notification(plan["requester_id"], f"❌ Tu plan <b>'{html.escape(plan['title'])}'</b> fue rechazado por Federico.")
+        await send_telegram_notification(
+            plan["requester_id"], f"❌ Tu plan <b>'{html.escape(plan['title'])}'</b> fue rechazado por Federico."
+        )
         return {"status": "success", "action": "rejected"}
 
     if payload.action == "approve":
         update_approval_plan_status(payload.plan_id, "approved")
-        await send_telegram_notification(plan["requester_id"], f"✅ Tu plan <b>'{html.escape(plan['title'])}'</b> fue aprobado por Federico. Iniciando ejecución...")
+        await send_telegram_notification(
+            plan["requester_id"],
+            f"✅ Tu plan <b>'{html.escape(plan['title'])}'</b> fue aprobado por Federico. Iniciando ejecución...",
+        )
 
         # Disparar ejecución en background
-        asyncio.create_task(run_background_worker_task(
-            user_id=plan["requester_id"],
-            chat_id=plan["requester_telegram_id"],
-            task=plan["task"],
-            target_project=plan["target_project"],
-        ))
+        asyncio.create_task(
+            run_background_worker_task(
+                user_id=plan["requester_id"],
+                chat_id=plan["requester_telegram_id"],
+                task=plan["task"],
+                target_project=plan["target_project"],
+            )
+        )
         return {"status": "success", "action": "approved_and_launched"}
 
     return JSONResponse({"status": "error", "message": "Acción inválida"}, status_code=400)
@@ -1000,12 +1064,10 @@ async def chat_stream(
                 try:
                     logger.info(f"Transcribing audio with local Whisper ASR at {whisper_url}...")
                     async with httpx.AsyncClient(timeout=60.0) as client:
-                        with open(temp_file, "rb") as af:
+                        with Path(temp_file).open("rb") as af:
                             files = {"audio_file": (filename, af, mime_type or "audio/ogg")}
                             resp = await client.post(
-                                f"{whisper_url}/asr",
-                                params={"task": "transcribe", "output": "json"},
-                                files=files
+                                f"{whisper_url}/asr", params={"task": "transcribe", "output": "json"}, files=files
                             )
                             if resp.status_code == 200:
                                 res_json = resp.json()
@@ -1021,10 +1083,12 @@ async def chat_stream(
                     try:
                         uploaded_file = genai.upload_file(path=str(temp_file), mime_type=mime_type)
                         transcription_model = genai.GenerativeModel("gemini-2.5-flash")
-                        response = transcription_model.generate_content([
-                            "Transcribe this voice note and explain user intent. Output ONLY the transcribed message or action.",
-                            uploaded_file,
-                        ])
+                        response = transcription_model.generate_content(
+                            [
+                                "Transcribe this voice note and explain user intent. Output ONLY the transcribed message or action.",
+                                uploaded_file,
+                            ]
+                        )
                         transcribed = response.text.strip()
                         logger.info(f"Gemini fallback transcribed: {transcribed}")
                     except Exception as fallback_err:
@@ -1037,10 +1101,12 @@ async def chat_stream(
             elif "image" in mime_type or filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
                 uploaded_file = genai.upload_file(path=str(temp_file), mime_type=mime_type)
                 vision_model = genai.GenerativeModel("gemini-2.5-flash")
-                response = vision_model.generate_content([
-                    "Analyze this image thoroughly. Describe what is shown, extract any visible text, errors, diagrams, or details relevant to homelab, programming, workouts, or general tasks.",
-                    uploaded_file,
-                ])
+                response = vision_model.generate_content(
+                    [
+                        "Analyze this image thoroughly. Describe what is shown, extract any visible text, errors, diagrams, or details relevant to homelab, programming, workouts, or general tasks.",
+                        uploaded_file,
+                    ]
+                )
                 media_context = f"\n\n[CONTEXTO VISUAL DE LA IMAGEN ADJUNTA '{filename}']:\n{response.text}\n"
 
             # 3. Documentos y Código (PDF, TXT, PY, LOG, CSV, JSON, MD)
@@ -1052,10 +1118,12 @@ async def chat_stream(
             elif filename.endswith(".pdf"):
                 uploaded_file = genai.upload_file(path=str(temp_file), mime_type="application/pdf")
                 doc_model = genai.GenerativeModel("gemini-2.5-flash")
-                response = doc_model.generate_content([
-                    "Extract and summarize the essential text and structure from this PDF document.",
-                    uploaded_file,
-                ])
+                response = doc_model.generate_content(
+                    [
+                        "Extract and summarize the essential text and structure from this PDF document.",
+                        uploaded_file,
+                    ]
+                )
                 media_context = f"\n\n[RESUMEN DEL DOCUMENTO PDF '{filename}']:\n{response.text}\n"
 
         except Exception as e:
@@ -1133,4 +1201,5 @@ async def chat_stream(
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8001)

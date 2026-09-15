@@ -121,9 +121,12 @@ class MessageProcessor:
             text = re.sub(rf"({marker})([^\s])", r"\1 \2", text)
 
         text = html.escape(text, quote=False)
+        # Inline code: `code`
         text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
-        text = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", text)
-        text = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"<i>\1</i>", text)
+        # Bold: *text* or **text**
+        text = re.sub(r"\*(\*?)(?!\s)(.+?)(?<!\s)\1\*", r"<b>\2</b>", text, flags=re.DOTALL)
+        # Italic: _text_
+        text = re.sub(r"_(?!\s)(.+?)(?<!\s)_", r"<i>\1</i>", text, flags=re.DOTALL)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
