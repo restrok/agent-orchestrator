@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   whisper:
     image: onerahmet/openai-whisper-asr-webservice:latest
@@ -32,8 +30,10 @@ services:
     depends_on:
       - whisper
     networks:
-      - default
-      - shared_internal_network
+      vlan100_net_dhcp:
+        ipv4_address: 192.168.89.28
+      default:
+      shared_internal_network:
     restart: unless-stopped
 
   gateway:
@@ -58,6 +58,8 @@ services:
 networks:
   default:
   shared_internal_network:
+    external: true
+  vlan100_net_dhcp:
     external: true
 
 volumes:
