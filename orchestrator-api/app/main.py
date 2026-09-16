@@ -160,8 +160,12 @@ async def send_telegram_notification(
 
 
 # --- Exocortex MCP Client Helper ---
-async def _invoke_mcp_tool(tool_name: str, arguments: dict) -> str:
+async def _invoke_mcp_tool(tool_name: str, arguments: dict, thread_id: str | None = None) -> str:
     """Invoca una herramienta en el servidor MCP Streamable HTTP de Exocortex."""
+    if thread_id and str(thread_id) in ACTIVE_STATUS_QUEUES:
+        with contextlib.suppress(Exception):
+            tool_friendly = tool_name.replace("brain_", "").replace("_", " ").title()
+            ACTIVE_STATUS_QUEUES[str(thread_id)].put_nowait(f"🧠 Exocortex Brain: {tool_friendly}...")
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -764,7 +768,10 @@ async def node_router(state: AgentState):
         structured_llm = llm.with_structured_output(IntentClassifier)
 
     try:
-        classification = await structured_llm.ainvoke(state["messages"])
+        router_system = SystemMessage(
+            content="Classify the user intent into one of the allowed categories: biometric_expert, exocortex_brain, antigravity_worker, general_chat, unknown. Do not call any external tools."
+        )
+        classification = await structured_llm.ainvoke([router_system, state["messages"][-1]])
         return {"intent": classification.intent, "loop_count": 0}
     except Exception as e:
         logger.error(f"Intent classification failed: {e}. Falling back to supervisor.")

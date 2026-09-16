@@ -372,6 +372,7 @@ async def process_request(
 
             full_response = ""
             last_update_time = 0
+            last_status_rendered = ""
 
             async with client.stream(
                 "POST", stream_url, data=data, files=files, headers=headers, timeout=900.0
@@ -393,11 +394,12 @@ async def process_request(
                             if "status" in chunk:
                                 status_msg = chunk["status"]
                                 current_time = asyncio.get_event_loop().time()
-                                if current_time - last_update_time > 1.5:
+                                if current_time - last_update_time > 1.5 and status_msg != last_status_rendered:
                                     with contextlib.suppress(Exception):
                                         await thinking_message.edit_text(
                                             f"⏳ <i>{status_msg}</i>", parse_mode=ParseMode.HTML
                                         )
+                                        last_status_rendered = status_msg
                                     last_update_time = current_time
                                 continue
 
