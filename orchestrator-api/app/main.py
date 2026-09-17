@@ -120,10 +120,67 @@ async def shutdown_event():
 
 
 # --- Notification Helper ---
+def split_text_into_chunks(text: str, max_chunk_size: int = 4000) -> list[str]:
+    """Divide un texto en bloques de longitud máxima `max_chunk_size`.
+
+    Respeta saltos de párrafo (\n\n), saltos de línea (\n) y espacios (' ')
+    para evitar cortar palabras a la mitad siempre que sea posible.
+    """
+    if not text:
+        return []
+
+    normalized = text.replace("\r\n", "\n").strip()
+    if not normalized:
+        return []
+
+    if len(normalized) <= max_chunk_size:
+        return [normalized]
+
+    chunks: list[str] = []
+    remaining = normalized
+    while remaining:
+        if len(remaining) <= max_chunk_size:
+            chunks.append(remaining)
+            break
+
+        p_para = remaining.rfind("\n\n", 0, max_chunk_size)
+        p_line = remaining.rfind("\n", 0, max_chunk_size)
+        p_space = remaining.rfind(" ", 0, max_chunk_size)
+
+        if p_para != -1 and p_para >= int(max_chunk_size * 0.75):
+            split_at, sep_len = p_para, 2
+        elif p_line != -1 and p_line >= int(max_chunk_size * 0.75):
+            split_at, sep_len = p_line, 1
+        elif p_para != -1 and p_para >= int(max_chunk_size * 0.5):
+            split_at, sep_len = p_para, 2
+        elif p_line != -1 and p_line >= int(max_chunk_size * 0.5):
+            split_at, sep_len = p_line, 1
+        elif p_space != -1 and p_space >= int(max_chunk_size * 0.5):
+            split_at, sep_len = p_space, 1
+        elif p_para > 0:
+            split_at, sep_len = p_para, 2
+        elif p_line > 0:
+            split_at, sep_len = p_line, 1
+        elif p_space > 0:
+            split_at, sep_len = p_space, 1
+        else:
+            split_at, sep_len = max_chunk_size, 0
+
+        chunk = remaining[:split_at].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[split_at + sep_len :].strip()
+
+    return chunks
+
+
 async def send_telegram_notification(
-    target_user: str, message: str, inline_keyboard: list[list[dict]] | None = None
+    target_user: str,
+    message: str,
+    inline_keyboard: list[list[dict]] | None = None,
+    delay_between_chunks: float = 0.35,
 ) -> bool:
-    """Envía notificación directa por Telegram a un usuario."""
+    """Envía notificación directa por Telegram a un usuario, dividiendo en chunks si excede 4000 caracteres."""
     chat_id = get_telegram_id(target_user)
     if not chat_id:
         # Check if target_user is already a numeric telegram chat_id
@@ -137,23 +194,50 @@ async def send_telegram_notification(
         logger.error("TELEGRAM_BOT_TOKEN not configured")
         return False
 
+    chunks = split_text_into_chunks(message, max_chunk_size=4000)
+    if not chunks:
+        logger.warning(f"Empty notification message for user {target_user}")
+        return False
+
     telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "HTML",
-    }
-    if inline_keyboard:
-        payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
+    success = True
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(telegram_url, json=payload)
-            if resp.status_code == 200:
-                logger.info(f"Notification sent successfully to {target_user} ({chat_id})")
-                return True
-            logger.error(f"Failed to send Telegram notification: {resp.text}")
-            return False
+            for i, chunk in enumerate(chunks):
+                if i > 0 and delay_between_chunks > 0:
+                    await asyncio.sleep(delay_between_chunks)
+
+                payload = {
+                    "chat_id": chat_id,
+                    "text": chunk,
+                    "parse_mode": "HTML",
+                }
+                # Attach inline_keyboard only to the last chunk
+                if inline_keyboard and i == len(chunks) - 1:
+                    payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
+
+                resp = await client.post(telegram_url, json=payload)
+                if resp.status_code != 200:
+                    error_desc = resp.text.lower()
+                    if "can't parse entities" in error_desc or "entity" in error_desc:
+                        logger.warning(
+                            f"Telegram HTML parse failed ({resp.text}), retrying chunk {i + 1}/{len(chunks)} as plain text..."
+                        )
+                        fallback_payload = dict(payload)
+                        fallback_payload.pop("parse_mode", None)
+                        resp = await client.post(telegram_url, json=fallback_payload)
+
+                if resp.status_code == 200:
+                    logger.info(
+                        f"Notification chunk {i + 1}/{len(chunks)} sent successfully to {target_user} ({chat_id})"
+                    )
+                else:
+                    logger.error(f"Failed to send Telegram notification chunk {i + 1}/{len(chunks)}: {resp.text}")
+                    success = False
+                    break
+
+        return success
     except Exception as e:
         logger.error(f"Error sending Telegram notification: {e}")
         return False
