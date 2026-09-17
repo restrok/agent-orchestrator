@@ -216,13 +216,10 @@ async def _invoke_mcp_tool(tool_name: str, arguments: dict, thread_id: str | Non
 # --- Tools ---
 
 
-@tool
-async def call_biometric_expert(
-    query: str,
-    user_id: Annotated[str, InjectedState("user_id")],
-    _thread_id: Annotated[str, InjectedState("thread_id")],
-):
-    """Calls the Biometric Expert Agent to get health, Garmin, or profile data."""
+async def _request_biometric_expert(query: str, user_id: str) -> str:
+    """Llama al servicio del Biometric Expert pasando la identidad del usuario sin defaults cableados."""
+    if not user_id:
+        return "Error: User ID no especificado para consultar al Biometric Expert."
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -243,6 +240,15 @@ async def call_biometric_expert(
         return "The Biometric Expert is taking too long to respond. Please wait a moment."
     except Exception as e:
         return f"An error occurred while reaching the Biometric Expert: {str(e)}"
+
+
+@tool
+async def call_biometric_expert(
+    query: str,
+    user_id: Annotated[str, InjectedState("user_id")],
+) -> str:
+    """Calls the Biometric Expert Agent to get health, Garmin, or profile data."""
+    return await _request_biometric_expert(query, user_id)
 
 
 # --- Exocortex Brain Tools ---
@@ -779,10 +785,10 @@ async def node_router(state: AgentState):
 
 
 async def biometric_expert_node(state: AgentState):
-    query = state["messages"][-1].content
-    user_id = state["user_id"]
-    thread_id = state["thread_id"]
-    result = await call_biometric_expert.ainvoke({"query": query, "user_id": user_id, "thread_id": thread_id})
+    last_msg = state["messages"][-1]
+    query = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+    user_id = state.get("user_id") or ""
+    result = await _request_biometric_expert(query, user_id)
     return {"messages": [AIMessage(content=result)]}
 
 
