@@ -1086,6 +1086,31 @@ async def notify(payload: NotificationPayload):
     return {"status": "success" if success else "error"}
 
 
+class CreateApprovalPlanPayload(BaseModel):
+    plan_id: str | None = None
+    requester_id: str
+    requester_telegram_id: str
+    title: str
+    plan_details: str
+    task: str
+    target_project: str
+
+
+@app.post("/api/plans")
+async def create_plan(payload: CreateApprovalPlanPayload):
+    plan_id = payload.plan_id or f"heal_{uuid.uuid4().hex[:8]}"
+    create_approval_plan(
+        plan_id=plan_id,
+        requester_id=payload.requester_id,
+        requester_telegram_id=payload.requester_telegram_id,
+        title=payload.title,
+        plan_details=payload.plan_details,
+        task=payload.task,
+        target_project=payload.target_project,
+    )
+    return {"status": "success", "plan_id": plan_id}
+
+
 class ApprovalActionPayload(BaseModel):
     plan_id: str
     action: str  # approve, reject
