@@ -86,7 +86,7 @@ DATABASE_URL=sqlite:////app/data/orchestrator.db
 ```env
 TELEGRAM_BOT_TOKEN=your_bot_token
 API_URL=http://orchestrator:8001
-ADMIN_USER_ID=963420066
+ADMIN_USER_ID=your_telegram_user_id
 ```
 
 ## 📄 License
