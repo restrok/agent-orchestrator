@@ -9,7 +9,7 @@ import shlex
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import google.generativeai as genai
 import httpx
@@ -85,6 +85,93 @@ HOST_SSH_IP = os.getenv("HOST_SSH_IP", "127.0.0.1")
 HOST_SSH_USER = os.getenv("HOST_SSH_USER", "worker")
 SSH_KEY_PATH = os.getenv("SSH_KEY_PATH", "/root/.ssh/id_ed25519")
 ALLOWED_WORKER_USERS = [u.strip().lower() for u in os.getenv("ALLOWED_WORKER_USERS", "fsirio").split(",") if u.strip()]
+
+
+def parse_env_float(key: str, default: float) -> float:
+    val = os.getenv(key)
+    if val is None:
+        return default
+    try:
+        parsed = float(val)
+        if parsed <= 0:
+            logger.warning(f"Invalid positive value for {key}='{val}', falling back to default {default}")
+            return default
+        return parsed
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid numeric value for {key}='{val}', falling back to default {default}")
+        return default
+
+
+def get_worker_sync_timeout() -> float:
+    return parse_env_float("WORKER_SYNC_TIMEOUT", 900.0)
+
+
+def get_worker_async_timeout() -> float:
+    return parse_env_float("WORKER_ASYNC_TIMEOUT", 14400.0)
+
+
+def get_worker_progress_mode() -> str:
+    mode = os.getenv("WORKER_PROGRESS_MODE", "final_only").strip().lower()
+    if mode not in ("final_only", "periodic"):
+        logger.warning(f"Invalid WORKER_PROGRESS_MODE='{mode}', falling back to default 'final_only'")
+        return "final_only"
+    return mode
+
+
+def get_worker_heartbeat_interval() -> float:
+    return parse_env_float("WORKER_HEARTBEAT_INTERVAL", 2700.0)
+
+
+WORKER_SYNC_TIMEOUT = get_worker_sync_timeout()
+WORKER_ASYNC_TIMEOUT = get_worker_async_timeout()
+WORKER_PROGRESS_MODE = get_worker_progress_mode()
+WORKER_HEARTBEAT_INTERVAL = get_worker_heartbeat_interval()
+
+
+def format_duration_for_agy(seconds: float) -> str:
+    sec = int(round(seconds))
+    if sec <= 0:
+        return "0s"
+    if sec % 3600 == 0:
+        return f"{sec // 3600}h"
+    if sec % 60 == 0:
+        return f"{sec // 60}m"
+    return f"{sec}s"
+
+
+def format_timeout_human(seconds: float) -> str:
+    sec = int(round(seconds))
+    if sec % 3600 == 0:
+        hours = sec // 3600
+        return f"{hours} hora" if hours == 1 else f"{hours} horas"
+    if sec % 60 == 0:
+        minutes = sec // 60
+        return f"{minutes} minuto" if minutes == 1 else f"{minutes} minutos"
+    return f"{sec} segundo" if sec == 1 else f"{sec} segundos"
+
+
+NEEDS_INPUT_REGEX = re.compile(
+    r"(?:\bapproval\b|needs\s+input|requiere\s+aprobaci[oó]n|\bconfirm\b|\bhitl\b|plan\s+para\s+aprobaci[oó]n|waiting_for_input|ask_question)",
+    re.IGNORECASE,
+)
+
+CRITICAL_ERROR_REGEX = re.compile(
+    r"(?:critical error|fatal error|error cr[ií]tico|panic:|segmentation fault)",
+    re.IGNORECASE,
+)
+
+
+def check_needs_input(text: str) -> bool:
+    if not text:
+        return False
+    return bool(NEEDS_INPUT_REGEX.search(text))
+
+
+def check_critical_error(text: str) -> bool:
+    if not text:
+        return False
+    return bool(CRITICAL_ERROR_REGEX.search(text))
+
 
 # Initialize Database
 init_db()
@@ -585,7 +672,12 @@ async def cancel_scheduled_task(job_id: str) -> str:
 
 
 async def run_ssh_worker_command(
-    task: str, target_project: str, q: asyncio.Queue | None = None
+    task: str,
+    target_project: str,
+    q: asyncio.Queue | None = None,
+    mode: str = "sync",
+    on_input_required: Any | None = None,
+    on_critical_error: Any | None = None,
 ) -> tuple[int, str, str]:
     """Helper base para ejecutar el Antigravity Worker mediante SSH en el host."""
     clean_project = target_project.strip().lstrip("~").lstrip("/")
@@ -595,14 +687,18 @@ async def run_ssh_worker_command(
         workspace_dir = f"/home/{HOST_SSH_USER}"
 
     key_path = SSH_KEY_PATH
-    if not Path(key_path).exists() and Path("/root/.ssh/id_rsa").exists():
-        key_path = "/root/.ssh/id_rsa"
+    with contextlib.suppress(PermissionError, OSError):
+        if not Path(key_path).exists() and Path("/root/.ssh/id_rsa").exists():
+            key_path = "/root/.ssh/id_rsa"
+
+    timeout_seconds = get_worker_async_timeout() if mode == "async" else get_worker_sync_timeout()
+    timeout_flag = format_duration_for_agy(timeout_seconds)
 
     cmd_flags = (
         "--dangerously-skip-permissions "
         "--model gemini-3.8-flash-medium "
         "--effort medium "
-        "--print-timeout 15m "
+        f"--print-timeout {timeout_flag} "
         "--output-format stream-json"
     )
     remote_cmd = (
@@ -653,6 +749,36 @@ async def run_ssh_worker_command(
                     state = su.get("state", "")
                     tool_name = su.get("tool_name") or ""
                     delta = su.get("text_delta", "")
+
+                    # Check for input required
+                    is_input_req = False
+                    input_desc = ""
+                    if tool_name == "ask_question" or state == "waiting_for_input":
+                        is_input_req = True
+                        input_desc = delta.strip() if delta else (tool_name or state)
+                    elif (
+                        check_needs_input(state)
+                        or check_needs_input(stype)
+                        or (tool_name and check_needs_input(tool_name))
+                        or (
+                            delta
+                            and tool_name not in ("write_to_file", "replace_file_content", "view_file")
+                            and check_needs_input(delta)
+                        )
+                    ):
+                        is_input_req = True
+                        input_desc = delta.strip() if delta else f"{stype or state}: {tool_name}"
+
+                    # Check for critical error
+                    is_crit_err = False
+                    err_desc = ""
+                    if state in ("error", "failed", "crashed") or "error" in su:
+                        is_crit_err = True
+                        err_desc = str(su.get("error") or delta or state)
+                    elif check_critical_error(delta):
+                        is_crit_err = True
+                        err_desc = delta.strip()
+
                     if tool_name:
                         msg = f"⚙️ Worker (Paso {idx}): ejecutando {tool_name}..."
                     elif delta:
@@ -662,24 +788,55 @@ async def run_ssh_worker_command(
                         msg = f"🧠 Worker (Paso {idx}): analizando código..."
                     else:
                         msg = f"🔍 Worker (Paso {idx}): {stype or state}..."
-                    if q:
+
+                    if is_input_req:
+                        req_msg = f"🔔 Worker requiere input/aprobación (Paso {idx}): {input_desc}"
+                        if on_input_required:
+                            await on_input_required(req_msg)
+                        if q:
+                            await q.put(req_msg)
+                    elif is_crit_err:
+                        crit_msg = f"🚨 Worker reportó error crítico (Paso {idx}): {err_desc}"
+                        if on_critical_error:
+                            await on_critical_error(crit_msg)
+                        if q:
+                            await q.put(crit_msg)
+                    elif q:
                         await q.put(msg)
+
                 elif ev == "result":
                     res = data.get("result", {})
                     if "response" in res:
                         final_result = res["response"]
+                elif ev == "error":
+                    err_detail = data.get("error") or data.get("message") or line_str
+                    if on_critical_error:
+                        await on_critical_error(f"🚨 Error en Worker: {err_detail}")
+                    if q:
+                        await q.put(f"🚨 Error: {err_detail}")
             except json.JSONDecodeError:
-                pass
+                if check_needs_input(line_str):
+                    req_msg = f"🔔 Worker requiere input/aprobación: {line_str}"
+                    if on_input_required:
+                        await on_input_required(req_msg)
+                    if q:
+                        await q.put(req_msg)
+                elif check_critical_error(line_str):
+                    crit_msg = f"🚨 Worker error crítico: {line_str}"
+                    if on_critical_error:
+                        await on_critical_error(crit_msg)
+                    if q:
+                        await q.put(crit_msg)
 
     try:
         await asyncio.wait_for(
             asyncio.gather(read_stdout_stream(), proc.wait()),
-            timeout=900.0,
+            timeout=timeout_seconds,
         )
     except asyncio.TimeoutError:
         with contextlib.suppress(Exception):
             proc.kill()
-        return -1, "", "Timeout: El Worker superó los 15 minutos de ejecución."
+        return -1, "", f"Timeout: El Worker superó {format_timeout_human(timeout_seconds)} de ejecución."
 
     stderr = await proc.stderr.read()
     stderr_str = stderr.decode("utf-8", errors="replace").strip()
@@ -689,38 +846,112 @@ async def run_ssh_worker_command(
 
 
 async def run_background_worker_task(user_id: str, chat_id: str, task: str, target_project: str):
-    """Tarea en segundo plano para Workers asíncronos con reportes periódicos a Telegram."""
+    """Tarea en segundo plano para Workers asíncronos con reportes de estado a Telegram."""
     worker_id = f"worker_{uuid.uuid4().hex[:8]}"
     register_background_worker(worker_id, user_id, chat_id, task, target_project)
 
     status_q = asyncio.Queue()
-    last_reported_time = asyncio.get_event_loop().time()
+    progress_mode = get_worker_progress_mode()
+    heartbeat_interval = get_worker_heartbeat_interval()
+    start_time = asyncio.get_event_loop().time()
+    last_reported_time = start_time
+    last_activity_time = start_time
     last_status = "Iniciando worker..."
 
     async def periodic_reporter():
-        nonlocal last_reported_time, last_status
+        nonlocal last_reported_time, last_status, last_activity_time
         while True:
-            await asyncio.sleep(45)  # Reporte de progreso cada 45 segundos
+            if heartbeat_interval < 1.0:
+                check_interval = max(0.01, heartbeat_interval / 2)
+            else:
+                check_interval = 1.0 if progress_mode == "periodic" else min(5.0, heartbeat_interval / 4)
+            await asyncio.sleep(check_interval)
             now = asyncio.get_event_loop().time()
-            if last_status and (now - last_reported_time >= 40):
-                msg = f"⏳ <b>Avance Worker (`{worker_id}`)</b>:\n<i>{html.escape(last_status)}</i>"
-                await send_telegram_notification(user_id, msg)
-                update_background_worker_progress(worker_id, last_status)
-                last_reported_time = now
+
+            if progress_mode == "periodic":
+                periodic_interval = heartbeat_interval if heartbeat_interval < 45.0 else 45.0
+                report_threshold = (
+                    max(0.05, periodic_interval - 5.0) if periodic_interval >= 5.0 else periodic_interval * 0.8
+                )
+                if last_status and (now - last_reported_time >= report_threshold):
+                    msg = f"⏳ <b>Avance Worker (`{worker_id}`)</b>:\n<i>{html.escape(last_status)}</i>"
+                    await send_telegram_notification(user_id, msg)
+                    update_background_worker_progress(worker_id, last_status)
+                    last_reported_time = now
+            else:
+                # Mode "final_only": Heartbeat silencioso salvo que supere heartbeat_interval sin actividad
+                if (now - last_activity_time >= heartbeat_interval) and (
+                    now - last_reported_time >= heartbeat_interval
+                ):
+                    elapsed_min = max(1, int((now - start_time) // 60))
+                    msg = (
+                        f"⏳ <b>Tarea en curso (`{worker_id}`)</b>:\n"
+                        f"{elapsed_min} min transcurridos sin novedades.\n"
+                        f"Último estado: <i>{html.escape(last_status)}</i>"
+                    )
+                    await send_telegram_notification(user_id, msg)
+                    update_background_worker_progress(worker_id, f"Heartbeat: {elapsed_min} min transcurridos")
+                    last_reported_time = now
 
     reporter_task = asyncio.create_task(periodic_reporter())
 
     async def drain_queue():
-        nonlocal last_status
+        nonlocal last_status, last_activity_time
         while True:
             item = await status_q.get()
             if item is None:
                 break
             last_status = item
+            last_activity_time = asyncio.get_event_loop().time()
 
     drain_task = asyncio.create_task(drain_queue())
 
-    returncode, stdout_str, stderr_str = await run_ssh_worker_command(task, target_project, q=status_q)
+    last_notified_input = ""
+    last_notified_input_time = 0.0
+
+    async def handle_input_required(detail: str):
+        nonlocal last_notified_input, last_notified_input_time
+        now = asyncio.get_event_loop().time()
+        if detail == last_notified_input and (now - last_notified_input_time < 30):
+            return
+        last_notified_input = detail
+        last_notified_input_time = now
+
+        msg = (
+            f"🔔 <b>Worker Requiere Atención (`{worker_id}`)</b>:\n\n"
+            f"<b>Tarea:</b> {html.escape(task)}\n\n"
+            f"<i>{html.escape(detail)}</i>"
+        )
+        await send_telegram_notification(user_id, msg)
+        update_background_worker_progress(worker_id, f"Requiere input: {detail[:200]}")
+
+    last_notified_error = ""
+    last_notified_error_time = 0.0
+
+    async def handle_critical_error(detail: str):
+        nonlocal last_notified_error, last_notified_error_time
+        now = asyncio.get_event_loop().time()
+        if detail == last_notified_error and (now - last_notified_error_time < 30):
+            return
+        last_notified_error = detail
+        last_notified_error_time = now
+
+        msg = (
+            f"🚨 <b>Error Crítico en Worker (`{worker_id}`)</b>:\n\n"
+            f"<b>Tarea:</b> {html.escape(task)}\n\n"
+            f"<i>{html.escape(detail)}</i>"
+        )
+        await send_telegram_notification(user_id, msg)
+        update_background_worker_progress(worker_id, f"Error crítico: {detail[:200]}")
+
+    returncode, stdout_str, stderr_str = await run_ssh_worker_command(
+        task,
+        target_project,
+        q=status_q,
+        mode="async",
+        on_input_required=handle_input_required,
+        on_critical_error=handle_critical_error,
+    )
     await status_q.put(None)
     reporter_task.cancel()
     with contextlib.suppress(Exception):
@@ -749,7 +980,7 @@ async def call_antigravity_worker(
 ) -> str:
     """Invoca al Agente Worker (Antigravity) para ejecutar tareas autónomas en el host homelab.
     - Modo 'sync': Para tareas cortas o consultas rápidas con respuesta inmediata en el chat.
-    - Modo 'async': Para tareas largas, refactors o pipelines en segundo plano con reportes periódicos de estado a Telegram.
+    - Modo 'async': Para tareas largas, refactors o pipelines en segundo plano con notificación de avance a Telegram.
     - SEGURIDAD: Exclusivo para 'fsirio'. Si un usuario no autorizado (ej: Mercedes) lo solicita, se genera un plan para aprobación humana."""
     user_lower = str(user_id).lower()
 
@@ -791,11 +1022,19 @@ async def call_antigravity_worker(
                 user_id=user_id, chat_id=str(thread_id), task=task, target_project=target_project
             )
         )
+        progress_mode = get_worker_progress_mode()
+        if progress_mode == "periodic":
+            tracking_msg = (
+                "Te iré enviando reportes de progreso a este chat de Telegram cada 45 segundos hasta su finalización."
+            )
+        else:
+            tracking_msg = "Te avisaré por este chat de Telegram ante requerimientos de atención/aprobación o al finalizar la tarea."
+
         return (
             f"🚀 **Antigravity Worker lanzado en segundo plano (modo async)**.\n\n"
             f"• **Tarea:** {task}\n"
             f"• **Proyecto:** `{target_project or 'workspace'}`\n"
-            f"• **Seguimiento:** Te iré enviando reportes de progreso a este chat de Telegram cada 45 segundos hasta su finalización."
+            f"• **Seguimiento:** {tracking_msg}"
         )
 
     # Modo Síncrono (sync)
@@ -803,7 +1042,7 @@ async def call_antigravity_worker(
     if q:
         await q.put(f"🚀 Worker Antigravity iniciado en {target_project or 'workspace'}...")
 
-    code, stdout_str, stderr_str = await run_ssh_worker_command(task, target_project, q=q)
+    code, stdout_str, stderr_str = await run_ssh_worker_command(task, target_project, q=q, mode="sync")
 
     if code == 0:
         if q:

@@ -149,6 +149,22 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_URL = os.getenv("API_URL", "http://agent-orchestrator-api:8001")
 
 
+def get_worker_async_timeout() -> float:
+    val = os.getenv("WORKER_ASYNC_TIMEOUT")
+    default = 14400.0
+    if val is None:
+        return default
+    try:
+        parsed = float(val)
+        if parsed <= 0:
+            logging.warning(f"Invalid positive WORKER_ASYNC_TIMEOUT='{val}', using default {default}")
+            return default
+        return parsed
+    except (ValueError, TypeError):
+        logging.warning(f"Invalid numeric WORKER_ASYNC_TIMEOUT='{val}', using default {default}")
+        return default
+
+
 def _load_env_json(var_name: str) -> dict[str, str]:
     val = os.getenv(var_name, "").strip()
     if not val:
@@ -374,8 +390,9 @@ async def process_request(
             last_update_time = 0
             last_status_rendered = ""
 
+            stream_timeout = get_worker_async_timeout() + 60.0
             async with client.stream(
-                "POST", stream_url, data=data, files=files, headers=headers, timeout=900.0
+                "POST", stream_url, data=data, files=files, headers=headers, timeout=stream_timeout
             ) as response:
                 if response.status_code != 200:
                     error_text = await response.aread()
