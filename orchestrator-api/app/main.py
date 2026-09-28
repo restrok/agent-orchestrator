@@ -331,8 +331,15 @@ async def send_telegram_notification(
 
 
 # --- Exocortex MCP Client Helper ---
-async def _invoke_mcp_tool(tool_name: str, arguments: dict, thread_id: str | None = None) -> str:
+async def _invoke_mcp_tool(
+    tool_name: str,
+    arguments: dict,
+    thread_id: str | None = None,
+    user_id: str | None = None,
+) -> str:
     """Invoca una herramienta en el servidor MCP Streamable HTTP de Exocortex."""
+    if user_id and "user_id" not in arguments:
+        arguments["user_id"] = user_id
     if thread_id and str(thread_id) in ACTIVE_STATUS_QUEUES:
         with contextlib.suppress(Exception):
             tool_friendly = tool_name.replace("brain_", "").replace("_", " ").title()
@@ -426,15 +433,38 @@ async def call_biometric_expert(
 
 
 @tool
-async def search_brain(query: str, space_id: str = "work", limit: int = 5) -> str:
-    """Busca conocimiento previo, decisiones históricas, notas de arquitectura o workflows en el Exocortex Brain."""
-    return await _invoke_mcp_tool("brain_search", {"query": query, "space_id": space_id, "limit": limit})
+async def search_brain(
+    query: str,
+    user_id: Annotated[str, InjectedState("user_id")],
+    space_id: str | None = None,
+    limit: int = 5,
+) -> str:
+    """Busca conocimiento previo, decisiones históricas, notas de arquitectura o workflows en el Exocortex Brain.
+
+    space_id puede ser 'personal', 'shared' o 'work' (opcional, por defecto busca en todos los espacios permitidos para el usuario).
+    """
+    args: dict[str, Any] = {"query": query, "limit": limit, "user_id": user_id}
+    if space_id is not None:
+        args["space_id"] = space_id
+    return await _invoke_mcp_tool("brain_search", args, user_id=user_id)
 
 
 @tool
-async def remember_in_brain(content: str, title: str, space_id: str = "work") -> str:
-    """Almacena conocimiento duradero, notas importantes o decisiones en el Vault del Exocortex Brain."""
-    return await _invoke_mcp_tool("brain_remember", {"content": content, "title": title, "space_id": space_id})
+async def remember_in_brain(
+    content: str,
+    title: str,
+    user_id: Annotated[str, InjectedState("user_id")],
+    space_id: str = "work",
+) -> str:
+    """Almacena conocimiento duradero, notas importantes o decisiones en el Vault del Exocortex Brain.
+
+    space_id puede ser 'personal', 'shared' o 'work'. El backend resuelve el espacio real según la identidad del usuario.
+    """
+    return await _invoke_mcp_tool(
+        "brain_remember",
+        {"content": content, "title": title, "space_id": space_id, "user_id": user_id},
+        user_id=user_id,
+    )
 
 
 @tool
@@ -1133,8 +1163,8 @@ async def supervisor_node(state: AgentState):
         "CAPABILITIES & TOOLS:\n"
         "1. Biometric Expert (`call_biometric_expert`): Consult physiological data, Garmin activities, sleep, HRV, running.\n"
         "2. Exocortex Brain:\n"
-        "   - `search_brain`: Search the user's second brain for past decisions, project notes, architecture docs, or general knowledge (space_id='work' or 'personal').\n"
-        "   - `remember_in_brain`: Save valuable notes, decisions, or durable context into vault.\n"
+        "   - `search_brain`: Search the second brain for past decisions, project notes, architecture docs, personal context, or general knowledge. space_id can be 'personal', 'shared', or 'work' (optional; if omitted, searches all permitted spaces). The backend deterministically resolves real target spaces based on user identity.\n"
+        "   - `remember_in_brain`: Save valuable notes, decisions, or durable context into the Vault. space_id can be 'personal', 'shared', or 'work' (the backend resolves real target spaces based on user identity). NEVER use suffixed space names.\n"
         "   - `register_intent_in_brain`, `get_intent_from_brain`, `update_intent_in_brain`: Manage conditional intents and proactive reminders.\n"
         "3. Weather & Proactive Scheduler:\n"
         "   - `get_weather_forecast`: Check weather forecast for Tigre, Buenos Aires or other locations.\n"
