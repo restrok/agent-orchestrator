@@ -283,10 +283,41 @@ def list_active_scheduled_tasks() -> list[dict[str, Any]]:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='apscheduler_jobs'")
+    has_apscheduler = cursor.fetchone() is not None
+
+    if has_apscheduler:
+        cursor.execute("SELECT id FROM apscheduler_jobs")
+        real_job_ids = {row[0] for row in cursor.fetchall()}
+        cursor.execute("SELECT * FROM scheduled_tasks WHERE status = 'scheduled' ORDER BY trigger_time ASC")
+        all_scheduled = [dict(r) for r in cursor.fetchall()]
+        active = []
+        for task in all_scheduled:
+            if task["job_id"] in real_job_ids:
+                active.append(task)
+            else:
+                cursor.execute(
+                    "UPDATE scheduled_tasks SET status = 'expired' WHERE job_id = ?",
+                    (task["job_id"],),
+                )
+        conn.commit()
+        conn.close()
+        return active
+
     cursor.execute("SELECT * FROM scheduled_tasks WHERE status = 'scheduled' ORDER BY trigger_time ASC")
     rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
     return rows
+
+
+def get_scheduled_task_by_job_id(job_id: str) -> dict[str, Any] | None:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM scheduled_tasks WHERE job_id = ?", (job_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def update_scheduled_task_status(job_id: str, status: str):

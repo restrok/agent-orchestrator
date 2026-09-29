@@ -19,6 +19,7 @@ from db import (
     complete_background_worker,
     create_approval_plan,
     get_approval_plan,
+    get_scheduled_task_by_job_id,
     get_telegram_id,
     get_user_mapping,
     init_db,
@@ -521,6 +522,42 @@ async def update_intent_in_brain(intent_id: str, status: str, context_data: dict
     )
 
 
+@tool
+async def create_space_in_brain(name: str, owner: str, space_type: str = "work", description: str = "") -> str:
+    """Crea un nuevo espacio de conocimiento en el Exocortex Brain (ej: work-dataart, work-consultora-x)."""
+    return await _invoke_mcp_tool(
+        "brain_create_space",
+        {
+            "name": name,
+            "owner": owner,
+            "space_type": space_type,
+            "description": description,
+        },
+    )
+
+
+async def get_user_allowed_spaces(user_id: str | None) -> list[str]:
+    """Retrieve allowed knowledge spaces from Exocortex Brain or deterministic fallback."""
+    if not user_id:
+        return ["work"]
+    try:
+        res = await _invoke_mcp_tool("brain_list_spaces", {"user_id": user_id})
+        data = json.loads(res)
+        if isinstance(data, dict) and "spaces" in data:
+            return [s["name"] if isinstance(s, dict) else str(s) for s in data["spaces"]]
+        if isinstance(data, list):
+            return [s["name"] if isinstance(s, dict) else str(s) for s in data]
+    except Exception as e:
+        logger.debug(f"Could not fetch spaces from brain MCP for {user_id}: {e}")
+
+    normalized = user_id.strip().lower()
+    if normalized == "fsirio":
+        return ["personal-fsirio", "shared", "work"]
+    if normalized == "mercedes":
+        return ["personal-mercedes", "shared"]
+    return ["work"]
+
+
 # --- Weather Tool (Open-Meteo) ---
 
 
@@ -669,6 +706,7 @@ async def schedule_task(
         id=job_id,
         args=[job_id, task_type, user_id, str(thread_id), title, payload, intent_id],
         replace_existing=True,
+        misfire_grace_time=3600,
     )
 
     logger.info(f"✅ Tarea [{title}] programada con éxito para {trigger_time_iso} (Job ID: {job_id})")
@@ -692,8 +730,19 @@ async def list_scheduled_tasks() -> str:
 @tool
 async def cancel_scheduled_task(job_id: str) -> str:
     """Cancela una tarea programada mediante su job_id."""
-    with contextlib.suppress(Exception):
-        scheduler.remove_job(job_id)
+    job = scheduler.get_job(job_id)
+    task = get_scheduled_task_by_job_id(job_id)
+
+    if not job and not task:
+        return f"⚠️ Tarea programada `{job_id}` no encontrada (not_found)."
+
+    if job:
+        with contextlib.suppress(Exception):
+            scheduler.remove_job(job_id)
+
+    if task and task.get("status") in ("cancelled", "triggered", "expired"):
+        return f"⚠️ La tarea `{job_id}` ya se encontraba en estado '{task['status']}'."
+
     update_scheduled_task_status(job_id, "cancelled")
     return f"❌ Tarea `{job_id}` cancelada correctamente."
 
@@ -1085,6 +1134,7 @@ tools = [
     call_biometric_expert,
     search_brain,
     remember_in_brain,
+    create_space_in_brain,
     get_brain_health,
     get_workflow,
     register_intent_in_brain,
@@ -1156,15 +1206,34 @@ async def supervisor_node(state: AgentState):
     current_loops = state.get("loop_count", 0)
     user_id = state["user_id"]
 
+    try:
+        from zoneinfo import ZoneInfo
+
+        now_ba = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires"))
+    except Exception:
+        now_ba = datetime.now()
+    current_time_str = now_ba.strftime("%Y-%m-%d %H:%M:%S %Z")
+    current_time_iso = now_ba.isoformat()
+
+    allowed_spaces = await get_user_allowed_spaces(user_id)
+    spaces_str = ", ".join(f"'{s}'" for s in allowed_spaces)
+
     system_prompt_content = (
         "You are an AI Orchestrator and Supervisor for a powerful Homelab and Biometric platform.\n\n"
         f"USER CONTEXT:\n"
         f"You are currently assisting user: '{user_id}'.\n\n"
+        f"CURRENT SYSTEM TIME:\n"
+        f"• Current Date/Time: {current_time_str} (ISO: {current_time_iso})\n"
+        f"• Always use this current time reference when scheduling tasks or interpreting relative expressions ('mañana', 'en 2 horas', 'el viernes'). Never schedule tasks in the past.\n\n"
+        f"KNOWLEDGE SPACES FOR USER '{user_id}':\n"
+        f"• Available spaces for this user: [{spaces_str}].\n"
+        f"• When searching or storing memory, only use or reference these permitted spaces and respect user isolation.\n\n"
         "CAPABILITIES & TOOLS:\n"
         "1. Biometric Expert (`call_biometric_expert`): Consult physiological data, Garmin activities, sleep, HRV, running.\n"
         "2. Exocortex Brain:\n"
-        "   - `search_brain`: Search the second brain for past decisions, project notes, architecture docs, personal context, or general knowledge. space_id can be 'personal', 'shared', or 'work' (optional; if omitted, searches all permitted spaces). The backend deterministically resolves real target spaces based on user identity.\n"
-        "   - `remember_in_brain`: Save valuable notes, decisions, or durable context into the Vault. space_id can be 'personal', 'shared', or 'work' (the backend resolves real target spaces based on user identity). NEVER use suffixed space names.\n"
+        "   - `search_brain`: Search the second brain for past decisions, project notes, architecture docs, personal context, or general knowledge. space_id can be any of the user's available spaces or omitted to search all permitted spaces.\n"
+        "   - `remember_in_brain`: Save valuable notes, decisions, or durable context into the Vault. space_id should be one of the permitted spaces for this user.\n"
+        "   - `create_space_in_brain`: Create a new knowledge space (e.g. 'work-dataart', 'work-consultora-x') dynamically.\n"
         "   - `register_intent_in_brain`, `get_intent_from_brain`, `update_intent_in_brain`: Manage conditional intents and proactive reminders.\n"
         "3. Weather & Proactive Scheduler:\n"
         "   - `get_weather_forecast`: Check weather forecast for Tigre, Buenos Aires or other locations.\n"
