@@ -118,7 +118,7 @@ async def test_send_telegram_notification_short_message():
 
         success = await send_telegram_notification(user_id, message)
 
-        assert success is True
+        assert success.success is True
         assert mock_post.call_count == 1
         call_kwargs = mock_post.call_args.kwargs
         assert call_kwargs["json"]["chat_id"] == "12345678"
@@ -144,7 +144,7 @@ async def test_send_telegram_notification_long_message_chunking():
 
         success = await send_telegram_notification(user_id, message, delay_between_chunks=0.1)
 
-        assert success is True
+        assert success.success is True
         assert mock_post.call_count > 1
 
         # All chunks sent must be <= 4000 chars
@@ -171,7 +171,7 @@ async def test_send_telegram_notification_with_newlines():
 
         success = await send_telegram_notification(user_id, message, delay_between_chunks=0)
 
-        assert success is True
+        assert success.success is True
         assert mock_post.call_count > 1
         for call in mock_post.call_args_list:
             sent_text = call.kwargs["json"]["text"]
@@ -194,7 +194,7 @@ async def test_send_telegram_notification_inline_keyboard_on_last_chunk():
 
         success = await send_telegram_notification(user_id, message, inline_keyboard=keyboard, delay_between_chunks=0)
 
-        assert success is True
+        assert success.success is True
         assert mock_post.call_count == 2
 
         first_call_json = mock_post.call_args_list[0].kwargs["json"]
@@ -224,7 +224,7 @@ async def test_send_telegram_notification_html_fallback():
 
         success = await send_telegram_notification(user_id, message)
 
-        assert success is True
+        assert success.success is True
         assert mock_post.call_count == 2
         first_call_payload = mock_post.call_args_list[0].kwargs["json"]
         second_call_payload = mock_post.call_args_list[1].kwargs["json"]
@@ -249,6 +249,6 @@ async def test_send_telegram_notification_failure_stops_sequence():
 
         success = await send_telegram_notification(user_id, message, delay_between_chunks=0)
 
-        assert success is False
+        assert success.success is False
         # Only the first chunk was attempted before failing
         assert mock_post.call_count == 1
