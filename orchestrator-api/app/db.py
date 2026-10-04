@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +91,26 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Notifications history tracking
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS notifications_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            user_id TEXT,
+            chat_id TEXT,
+            message TEXT NOT NULL,
+            parse_mode TEXT,
+            status TEXT NOT NULL, -- sent, failed, partial
+            telegram_message_id TEXT,
+            error TEXT,
+            chunks_total INTEGER,
+            chunks_sent INTEGER
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications_history (created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_agent ON notifications_history (agent_id)")
 
     for tid, pid in CANONICAL_USERS.items():
         cursor.execute(
@@ -326,3 +347,119 @@ def update_scheduled_task_status(job_id: str, status: str):
     cursor.execute("UPDATE scheduled_tasks SET status = ? WHERE job_id = ?", (status, job_id))
     conn.commit()
     conn.close()
+
+
+# --- Notifications History DB Helpers ---
+
+
+def log_notification(
+    agent_id: str,
+    message: str,
+    status: str,
+    user_id: str | None = None,
+    chat_id: str | None = None,
+    parse_mode: str | None = None,
+    telegram_message_id: str | None = None,
+    error: str | None = None,
+    chunks_total: int | None = None,
+    chunks_sent: int | None = None,
+    created_at: str | None = None,
+) -> int:
+    """Inserts a notification record into notifications_history and returns its id."""
+    if not created_at:
+        created_at = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO notifications_history (
+            created_at, agent_id, user_id, chat_id, message, parse_mode,
+            status, telegram_message_id, error, chunks_total, chunks_sent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            created_at,
+            agent_id,
+            user_id,
+            chat_id,
+            message,
+            parse_mode,
+            status,
+            telegram_message_id,
+            error,
+            chunks_total,
+            chunks_sent,
+        ),
+    )
+    inserted_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return inserted_id
+
+
+def get_notifications(
+    agent_id: str | None = None,
+    since: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Retrieves notifications history filtered by agent_id and/or since ISO date."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    query = "SELECT * FROM notifications_history"
+    conditions = []
+    params: list[Any] = []
+
+    if agent_id:
+        conditions.append("agent_id = ?")
+        params.append(agent_id)
+    if since:
+        conditions.append("created_at >= ?")
+        params.append(since)
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    cursor.execute(query, params)
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_notification_stats(since: str | None = None) -> dict[str, Any]:
+    """Retrieves notification counts grouped by agent_id and status."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    base_where = ""
+    params: list[Any] = []
+    if since:
+        base_where = " WHERE created_at >= ?"
+        params.append(since)
+
+    cursor.execute(f"SELECT COUNT(*) FROM notifications_history{base_where}", params)
+    total = cursor.fetchone()[0]
+
+    cursor.execute(
+        f"SELECT agent_id, COUNT(*) FROM notifications_history{base_where} GROUP BY agent_id",
+        params,
+    )
+    by_agent = {row[0]: row[1] for row in cursor.fetchall()}
+
+    cursor.execute(
+        f"SELECT status, COUNT(*) FROM notifications_history{base_where} GROUP BY status",
+        params,
+    )
+    by_status = {row[0]: row[1] for row in cursor.fetchall()}
+
+    conn.close()
+    return {
+        "total": total,
+        "by_agent": by_agent,
+        "by_status": by_status,
+    }
