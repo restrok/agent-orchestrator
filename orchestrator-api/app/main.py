@@ -19,11 +19,14 @@ from db import (
     complete_background_worker,
     create_approval_plan,
     get_approval_plan,
+    get_notification_stats,
+    get_notifications,
     get_scheduled_task_by_job_id,
     get_telegram_id,
     get_user_mapping,
     init_db,
     list_active_scheduled_tasks,
+    log_notification,
     register_background_worker,
     register_scheduled_task,
     register_user,
@@ -262,12 +265,54 @@ def split_text_into_chunks(text: str, max_chunk_size: int = 4000) -> list[str]:
     return chunks
 
 
+class TelegramNotificationResult(dict):
+    """Result returned by send_telegram_notification containing delivery metadata."""
+
+    def __init__(
+        self,
+        success: bool,
+        chunks_sent: int = 0,
+        chunks_total: int = 0,
+        telegram_message_id: str | None = None,
+        error: str | None = None,
+        status: str = "failed",
+        chat_id: str | None = None,
+    ):
+        super().__init__(
+            success=success,
+            chunks_sent=chunks_sent,
+            chunks_total=chunks_total,
+            telegram_message_id=telegram_message_id,
+            error=error,
+            status=status,
+            chat_id=chat_id,
+        )
+        self.success = success
+        self.chunks_sent = chunks_sent
+        self.chunks_total = chunks_total
+        self.telegram_message_id = telegram_message_id
+        self.message_id = telegram_message_id
+        self.error = error
+        self.status = status
+        self.chat_id = chat_id
+
+    def __bool__(self) -> bool:
+        return self.success
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, bool):
+            return self.success is other
+        return super().__eq__(other)
+
+
 async def send_telegram_notification(
     target_user: str,
     message: str,
     inline_keyboard: list[list[dict]] | None = None,
     delay_between_chunks: float = 0.35,
-) -> bool:
+    parse_mode: str | None = "HTML",
+    disable_notification: bool = False,
+) -> TelegramNotificationResult:
     """Envía notificación directa por Telegram a un usuario, dividiendo en chunks si excede 4000 caracteres."""
     chat_id = get_telegram_id(target_user)
     if not chat_id:
@@ -275,20 +320,50 @@ async def send_telegram_notification(
         if str(target_user).isdigit():
             chat_id = str(target_user)
         else:
-            logger.error(f"Cannot send notification: User {target_user} has no telegram_id mapped.")
-            return False
+            err = f"Cannot send notification: User {target_user} has no telegram_id mapped."
+            logger.error(err)
+            return TelegramNotificationResult(
+                success=False,
+                chunks_sent=0,
+                chunks_total=0,
+                telegram_message_id=None,
+                error=err,
+                status="failed",
+                chat_id=None,
+            )
 
     if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN not configured")
-        return False
+        err = "TELEGRAM_BOT_TOKEN not configured"
+        logger.error(err)
+        return TelegramNotificationResult(
+            success=False,
+            chunks_sent=0,
+            chunks_total=0,
+            telegram_message_id=None,
+            error=err,
+            status="failed",
+            chat_id=chat_id,
+        )
 
     chunks = split_text_into_chunks(message, max_chunk_size=4000)
     if not chunks:
-        logger.warning(f"Empty notification message for user {target_user}")
-        return False
+        err = f"Empty notification message for user {target_user}"
+        logger.warning(err)
+        return TelegramNotificationResult(
+            success=False,
+            chunks_sent=0,
+            chunks_total=0,
+            telegram_message_id=None,
+            error=err,
+            status="failed",
+            chat_id=chat_id,
+        )
 
     telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    success = True
+    chunks_total = len(chunks)
+    chunks_sent = 0
+    last_message_id: str | None = None
+    last_error: str | None = None
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -296,39 +371,80 @@ async def send_telegram_notification(
                 if i > 0 and delay_between_chunks > 0:
                     await asyncio.sleep(delay_between_chunks)
 
-                payload = {
+                payload: dict[str, Any] = {
                     "chat_id": chat_id,
                     "text": chunk,
-                    "parse_mode": "HTML",
                 }
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
+                if disable_notification:
+                    payload["disable_notification"] = True
+
                 # Attach inline_keyboard only to the last chunk
-                if inline_keyboard and i == len(chunks) - 1:
+                if inline_keyboard and i == chunks_total - 1:
                     payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
 
                 resp = await client.post(telegram_url, json=payload)
-                if resp.status_code != 200:
+                if resp.status_code != 200 and parse_mode:
                     error_desc = resp.text.lower()
                     if "can't parse entities" in error_desc or "entity" in error_desc:
                         logger.warning(
-                            f"Telegram HTML parse failed ({resp.text}), retrying chunk {i + 1}/{len(chunks)} as plain text..."
+                            f"Telegram {parse_mode} parse failed ({resp.text}), retrying chunk {i + 1}/{chunks_total} as plain text..."
                         )
                         fallback_payload = dict(payload)
                         fallback_payload.pop("parse_mode", None)
                         resp = await client.post(telegram_url, json=fallback_payload)
 
                 if resp.status_code == 200:
+                    chunks_sent += 1
+                    try:
+                        resp_data = resp.json()
+                        if isinstance(resp_data, dict):
+                            result_obj = resp_data.get("result", {})
+                            if isinstance(result_obj, dict) and "message_id" in result_obj:
+                                last_message_id = str(result_obj["message_id"])
+                    except Exception as json_err:
+                        logger.debug(f"Could not parse message_id from Telegram response: {json_err}")
+
                     logger.info(
-                        f"Notification chunk {i + 1}/{len(chunks)} sent successfully to {target_user} ({chat_id})"
+                        f"Notification chunk {i + 1}/{chunks_total} sent successfully to {target_user} ({chat_id})"
                     )
                 else:
-                    logger.error(f"Failed to send Telegram notification chunk {i + 1}/{len(chunks)}: {resp.text}")
-                    success = False
+                    last_error = resp.text
+                    logger.error(f"Failed to send Telegram notification chunk {i + 1}/{chunks_total}: {resp.text}")
                     break
 
-        return success
+        if chunks_sent == chunks_total and chunks_total > 0:
+            status = "sent"
+            success = True
+        elif chunks_sent > 0:
+            status = "partial"
+            success = False
+        else:
+            status = "failed"
+            success = False
+
+        return TelegramNotificationResult(
+            success=success,
+            chunks_sent=chunks_sent,
+            chunks_total=chunks_total,
+            telegram_message_id=last_message_id,
+            error=last_error,
+            status=status,
+            chat_id=chat_id,
+        )
     except Exception as e:
         logger.error(f"Error sending Telegram notification: {e}")
-        return False
+        status = "partial" if chunks_sent > 0 else "failed"
+        return TelegramNotificationResult(
+            success=False,
+            chunks_sent=chunks_sent,
+            chunks_total=chunks_total,
+            telegram_message_id=last_message_id,
+            error=str(e),
+            status=status,
+            chat_id=chat_id,
+        )
 
 
 # --- Exocortex MCP Client Helper ---
@@ -1413,15 +1529,217 @@ class NotificationPayload(BaseModel):
     user_id: str
     agent_id: str
     message: str
+    parse_mode: str | None = "HTML"  # permitir None para texto plano
+    raw: bool = False  # si True, NO anteponer el prefijo "🔔 Notificación (agent_id):"
+    inline_keyboard: list[list[dict]] | None = None
+    disable_notification: bool = False  # silencioso
 
 
 @app.post("/api/notify")
 async def notify(payload: NotificationPayload):
-    success = await send_telegram_notification(
-        payload.user_id,
-        f"🔔 <b>Notificación ({html.escape(payload.agent_id)})</b>:\n\n{MessageProcessor.decode(payload.message)}",
+    if payload.raw:
+        if payload.parse_mode == "HTML":
+            formatted_message = MessageProcessor.decode(payload.message)
+        else:
+            formatted_message = payload.message
+    else:
+        if payload.parse_mode == "HTML":
+            prefix = f"🔔 <b>Notificación ({html.escape(payload.agent_id)})</b>:\n\n"
+            formatted_message = f"{prefix}{MessageProcessor.decode(payload.message)}"
+        else:
+            prefix = f"🔔 Notificación ({payload.agent_id}):\n\n"
+            formatted_message = f"{prefix}{payload.message}"
+
+    res = await send_telegram_notification(
+        target_user=payload.user_id,
+        message=formatted_message,
+        inline_keyboard=payload.inline_keyboard,
+        parse_mode=payload.parse_mode,
+        disable_notification=payload.disable_notification,
     )
-    return {"status": "success" if success else "error"}
+
+    log_notification(
+        agent_id=payload.agent_id,
+        user_id=payload.user_id,
+        chat_id=res.chat_id,
+        message=formatted_message,
+        parse_mode=payload.parse_mode,
+        status=res.status,
+        telegram_message_id=res.telegram_message_id,
+        error=res.error,
+        chunks_total=res.chunks_total,
+        chunks_sent=res.chunks_sent,
+    )
+
+    return {
+        "status": "success" if res.success else "error",
+        "telegram_message_id": res.telegram_message_id,
+    }
+
+
+@app.get("/api/notifications")
+async def list_notifications_endpoint(
+    agent_id: str | None = None,
+    since: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    clean_agent_id = agent_id.strip() if agent_id and agent_id.strip() else None
+    clean_since = since.strip() if since and since.strip() else None
+    return get_notifications(
+        agent_id=clean_agent_id,
+        since=clean_since,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/api/notifications/stats")
+async def notification_stats_endpoint(
+    since: str | None = None,
+):
+    clean_since = since.strip() if since and since.strip() else None
+    return get_notification_stats(since=clean_since)
+
+
+@app.post("/api/notify/crowdsec")
+async def notify_crowdsec(request: Request, user_id: str = "fsirio"):
+    body = await request.json()
+    items = body if isinstance(body, list) else [body]
+    if not items:
+        return {"status": "error", "message": "Empty payload"}
+
+    target_user = user_id
+    if isinstance(body, dict) and body.get("user_id"):
+        target_user = str(body["user_id"])
+
+    lines = ["🚨 <b>[ALERTA DE SEGURIDAD - CROWDSEC]</b>\n"]
+    for alert in items:
+        if not isinstance(alert, dict):
+            continue
+        scenario = alert.get("scenario") or alert.get("rule") or "Desconocido"
+        source = alert.get("source")
+        if isinstance(source, dict):
+            src_val = (
+                source.get("value") or source.get("ip") or source.get("cn") or source.get("as_name") or str(source)
+            )
+        else:
+            src_val = str(source) if source else "N/A"
+
+        lines.append(f"🎯 <b>Detección / Escenario:</b> <code>{html.escape(str(scenario))}</code>")
+        lines.append(f"🌐 <b>Origen / IP:</b> <code>{html.escape(str(src_val))}</code>")
+
+        if alert.get("message"):
+            lines.append(f"📝 <b>Mensaje:</b> {html.escape(str(alert['message']))}")
+
+        decisions = alert.get("decisions")
+        if isinstance(decisions, list) and decisions:
+            dec_strs = []
+            for d in decisions:
+                if isinstance(d, dict):
+                    dtype = d.get("type", "ban")
+                    dur = d.get("duration", "")
+                    dec_strs.append(f"{dtype} ({dur})" if dur else str(dtype))
+                else:
+                    dec_strs.append(str(d))
+            lines.append(f"🛡️ <b>Decisión:</b> {html.escape(', '.join(dec_strs))}")
+
+        events_count = alert.get("events_count")
+        if events_count:
+            lines.append(f"🔢 <b>Eventos:</b> {events_count}")
+        lines.append("")
+
+    formatted_message = "\n".join(lines).strip()
+    res = await send_telegram_notification(
+        target_user=target_user,
+        message=formatted_message,
+        parse_mode="HTML",
+    )
+
+    log_notification(
+        agent_id="crowdsec",
+        user_id=target_user,
+        chat_id=res.chat_id,
+        message=formatted_message,
+        parse_mode="HTML",
+        status=res.status,
+        telegram_message_id=res.telegram_message_id,
+        error=res.error,
+        chunks_total=res.chunks_total,
+        chunks_sent=res.chunks_sent,
+    )
+
+    return {
+        "status": "success" if res.success else "error",
+        "telegram_message_id": res.telegram_message_id,
+    }
+
+
+@app.post("/api/notify/alertmanager")
+async def notify_alertmanager(request: Request, user_id: str = "fsirio"):
+    body = await request.json()
+    if not isinstance(body, dict):
+        return {"status": "error", "message": "Invalid Alertmanager payload"}
+
+    target_user = str(body.get("user_id") or user_id)
+    status = (body.get("status") or "firing").upper()
+    status_emoji = "🚨" if status == "FIRING" else "✅"
+    common_labels = body.get("commonLabels") or {}
+    common_annotations = body.get("commonAnnotations") or {}
+    alerts = body.get("alerts") or []
+
+    lines = [f"{status_emoji} <b>[PROMETHEUS ALERTMANAGER - {status}]</b>\n"]
+
+    if common_labels.get("alertname"):
+        lines.append(f"🔔 <b>Alerta:</b> <code>{html.escape(str(common_labels['alertname']))}</code>")
+    if common_labels.get("severity"):
+        lines.append(f"⚠️ <b>Severidad:</b> <code>{html.escape(str(common_labels['severity']))}</code>")
+
+    if alerts and isinstance(alerts, list):
+        lines.append(f"\n<b>Alertas activas ({len(alerts)}):</b>")
+        for i, a in enumerate(alerts, start=1):
+            if not isinstance(a, dict):
+                continue
+            labels = a.get("labels", {})
+            annotations = a.get("annotations", {})
+            aname = labels.get("alertname", f"Alert #{i}")
+            instance = labels.get("instance")
+            summary = annotations.get("summary") or annotations.get("description") or ""
+
+            alert_desc = f"• <b>{html.escape(str(aname))}</b>"
+            if instance:
+                alert_desc += f" (<i>{html.escape(str(instance))}</i>)"
+            if summary:
+                alert_desc += f": {html.escape(str(summary))}"
+            lines.append(alert_desc)
+    elif common_annotations.get("description") or common_annotations.get("summary"):
+        desc = common_annotations.get("description") or common_annotations.get("summary")
+        lines.append(f"\n📝 <b>Detalle:</b> {html.escape(str(desc))}")
+
+    formatted_message = "\n".join(lines).strip()
+    res = await send_telegram_notification(
+        target_user=target_user,
+        message=formatted_message,
+        parse_mode="HTML",
+    )
+
+    log_notification(
+        agent_id="alertmanager",
+        user_id=target_user,
+        chat_id=res.chat_id,
+        message=formatted_message,
+        parse_mode="HTML",
+        status=res.status,
+        telegram_message_id=res.telegram_message_id,
+        error=res.error,
+        chunks_total=res.chunks_total,
+        chunks_sent=res.chunks_sent,
+    )
+
+    return {
+        "status": "success" if res.success else "error",
+        "telegram_message_id": res.telegram_message_id,
+    }
 
 
 class CreateApprovalPlanPayload(BaseModel):
