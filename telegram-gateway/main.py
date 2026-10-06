@@ -68,12 +68,36 @@ class MessageProcessor:
         return chunks
 
     @staticmethod
+    def _escape_preserving_tags(text: str) -> str:
+        """Escapes HTML special characters in text while preserving valid Telegram HTML tags."""
+        if not text:
+            return ""
+        tag_pattern = re.compile(
+            r"</?(?:b|strong|i|em|u|s|strike|del|code|pre|a|tg-spoiler)(?:\s[^<>]*)?>",
+            re.IGNORECASE,
+        )
+        result = []
+        last_idx = 0
+        for match in tag_pattern.finditer(text):
+            start, end = match.span()
+            if start > last_idx:
+                result.append(html.escape(text[last_idx:start], quote=False))
+            result.append(match.group(0))
+            last_idx = end
+        if last_idx < len(text):
+            result.append(html.escape(text[last_idx:], quote=False))
+        return "".join(result)
+
+    @staticmethod
     def decode(text: str) -> str:
         """Robustly formats text for Telegram's HTML mode."""
         if not text:
             return ""
 
-        text = text.replace("\\n", "\n")
+        # a) Normalizar saltos de línea (\r\n -> \n)
+        text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\\n", "\n")
+
+        # b) Convertir tablas Markdown a listas con emojis (mantener lógica actual, inyectando <b>)
         lines = text.split("\n")
         processed_lines = []
         in_table = False
@@ -128,19 +152,22 @@ class MessageProcessor:
                 processed_lines.append(line)
 
         text = "\n".join(processed_lines)
-        text = re.sub(r"^###\s+(.*)$", r"\n\n<b>\1</b>\n", text, flags=re.MULTILINE)
-        structural_markers = [r"🔹", r"⚠️", r"✅", r"📅", r"🔔", r"🏃", r"🔋", r"💪", r"🧘‍♂️", r"🎯"]
-        for marker in structural_markers:
-            text = re.sub(rf"([^\n])\s*({marker})", r"\1\n\n\2", text)
-            text = re.sub(rf"({marker})([^\s])", r"\1 \2", text)
 
-        text = html.escape(text, quote=False)
-        # Inline code: `code`
+        # c) Convertir headers de TODOS los niveles
+        text = re.sub(r"^#{1,6}\s+(.*)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+
+        # d) Convertir separadores
+        text = re.sub(r"^\s*-{3,}\s*$", "──────────", text, flags=re.MULTILINE)
+
+        # e) Convertir inline: `code` -> <code>, **bold** -> <b>, *bold* -> <b>, _italic_ -> <i>
         text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
-        # Bold: *text* or **text**
-        text = re.sub(r"\*(\*?)(?!\s)(.+?)(?<!\s)\1\*", r"<b>\2</b>", text, flags=re.DOTALL)
-        # Italic: _text_
-        text = re.sub(r"_(?!\s)(.+?)(?<!\s)_", r"<i>\1</i>", text, flags=re.DOTALL)
+        text = re.sub(r"\*\*(?!\s)(.+?)(?<!\s)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+        text = re.sub(r"\*(?!\s)(.+?)(?<!\s)\*", r"<b>\1</b>", text, flags=re.DOTALL)
+        text = re.sub(r"(?<!\w)_(?!\s)(.+?)(?<!\s)_(?!\w)", r"<i>\1</i>", text, flags=re.DOTALL)
+
+        # f) AL FINAL (una sola vez), escapar preservando tags HTML válidos
+        text = MessageProcessor._escape_preserving_tags(text)
+
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
