@@ -56,12 +56,7 @@ def test_message_processor_separators():
 
 def test_message_processor_markdown_table():
     """Test Markdown tables are converted to lists with <b>."""
-    table_text = (
-        "| Métrica | Valor |\n"
-        "|---|---|\n"
-        "| Ritmo | 5:00 min/km |\n"
-        "| Distancia | 10 km |"
-    )
+    table_text = "| Métrica | Valor |\n|---|---|\n| Ritmo | 5:00 min/km |\n| Distancia | 10 km |"
     decoded = MessageProcessor.decode(table_text)
     assert "⏱️ <b>Ritmo:</b> 5:00 min/km" in decoded
     assert "📍 <b>Distancia:</b> 10 km" in decoded
