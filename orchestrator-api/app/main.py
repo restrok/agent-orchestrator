@@ -22,6 +22,7 @@ from db import (
     get_notification_stats,
     get_notifications,
     get_scheduled_task_by_job_id,
+    get_system_setting,
     get_telegram_id,
     get_user_mapping,
     init_db,
@@ -30,6 +31,7 @@ from db import (
     register_background_worker,
     register_scheduled_task,
     register_user,
+    set_system_setting,
     update_approval_plan_status,
     update_background_worker_progress,
     update_scheduled_task_status,
@@ -863,7 +865,101 @@ async def cancel_scheduled_task(job_id: str) -> str:
     return f"❌ Tarea `{job_id}` cancelada correctamente."
 
 
-# --- Multi-Worker Execution Logic ---
+# --- Multi-Worker Execution Logic & Model Configuration ---
+
+DEFAULT_WORKER_MODEL = os.getenv("DEFAULT_WORKER_MODEL", "gemini-3.8-flash-medium")
+DEFAULT_WORKER_EFFORT = os.getenv("DEFAULT_WORKER_EFFORT", "medium")
+VALID_WORKER_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+WORKER_MODEL_CATALOG: dict[str, dict[str, str]] = {
+    "gemini-4-argon-low": {"label": "Gemini 4 Argon (Low)", "default_effort": "low"},
+    "gemini-4-argon-medium": {"label": "Gemini 4 Argon (Medium)", "default_effort": "medium"},
+    "gemini-4-argon-high": {"label": "Gemini 4 Argon (High)", "default_effort": "high"},
+    "gemini-3.8-flash-low": {"label": "Gemini 3.8 Flash (Low)", "default_effort": "low"},
+    "gemini-3.8-flash-medium": {"label": "Gemini 3.8 Flash (Medium)", "default_effort": "medium"},
+    "gemini-3.8-flash-high": {"label": "Gemini 3.8 Flash (High)", "default_effort": "high"},
+    "claude-opus-5-5-low": {"label": "Claude Opus 5.5 (Low)", "default_effort": "low"},
+    "claude-opus-5-5-medium": {"label": "Claude Opus 5.5 (Medium)", "default_effort": "medium"},
+    "claude-opus-5-5-high": {"label": "Claude Opus 5.5 (High)", "default_effort": "high"},
+    "claude-sonnet-5-5-low": {"label": "Claude Sonnet 5.5 (Low)", "default_effort": "low"},
+    "claude-sonnet-5-5-medium": {"label": "Claude Sonnet 5.5 (Medium)", "default_effort": "medium"},
+    "claude-sonnet-5-5-high": {"label": "Claude Sonnet 5.5 (High)", "default_effort": "high"},
+    "gpt-oss-120b-medium": {"label": "GPT-OSS 120B (Medium)", "default_effort": "medium"},
+}
+
+
+def resolve_worker_model_and_effort(
+    model_query: str | None = None,
+    effort_query: str | None = None,
+) -> tuple[str, str] | None:
+    """Resuelve un nombre, alias o ID de modelo del Worker (ej: 'sonnet high', 'opus', 'argon medium')
+    al par canónico (model_id, effort) soportado por `agy` CLI."""
+    if not model_query or not model_query.strip():
+        return None
+
+    q = model_query.strip().lower()
+    explicit_effort = effort_query.strip().lower() if effort_query and effort_query.strip() else None
+    if explicit_effort and explicit_effort not in VALID_WORKER_EFFORTS:
+        explicit_effort = None
+
+    # 1. Coincidencia exacta en el catálogo
+    if q in WORKER_MODEL_CATALOG:
+        eff = explicit_effort or WORKER_MODEL_CATALOG[q]["default_effort"]
+        return q, eff
+
+    # 2. Detectar nivel de esfuerzo implícito en la consulta si no se pasó explícito
+    inferred_effort = explicit_effort
+    if not inferred_effort:
+        if re.search(r"\b(low|bajo|lite)\b", q):
+            inferred_effort = "low"
+        elif re.search(r"\b(high|alto|max|xhigh)\b", q):
+            inferred_effort = "high"
+        elif re.search(r"\b(medium|medio|med|normal)\b", q):
+            inferred_effort = "medium"
+
+    eff_suffix = inferred_effort if inferred_effort in ("low", "medium", "high") else "medium"
+
+    # 3. Mapeo por familia de modelo
+    if any(k in q for k in ("argon", "gemini 4", "gemini-4")):
+        model_id = f"gemini-4-argon-{eff_suffix}"
+        return model_id, (explicit_effort or eff_suffix)
+
+    if any(k in q for k in ("flash", "gemini 3.8", "gemini-3.8", "3.8", "gemini")):
+        model_id = f"gemini-3.8-flash-{eff_suffix}"
+        return model_id, (explicit_effort or eff_suffix)
+
+    if "opus" in q:
+        model_id = f"claude-opus-5-5-{eff_suffix}"
+        return model_id, (explicit_effort or eff_suffix)
+
+    if any(k in q for k in ("sonnet", "claude")):
+        model_id = f"claude-sonnet-5-5-{eff_suffix}"
+        return model_id, (explicit_effort or eff_suffix)
+
+    if any(k in q for k in ("gpt", "oss", "120b")):
+        return "gpt-oss-120b-medium", (explicit_effort or "medium")
+
+    return None
+
+
+def get_active_worker_config(
+    model_override: str | None = None,
+    effort_override: str | None = None,
+) -> tuple[str, str]:
+    """Obtiene el (model_id, effort) activo para el Worker (considerando override puntual o SQLite)."""
+    if model_override and model_override.strip():
+        resolved = resolve_worker_model_and_effort(model_override, effort_override)
+        if resolved:
+            return resolved
+
+    saved_model = get_system_setting("worker_model", DEFAULT_WORKER_MODEL) or DEFAULT_WORKER_MODEL
+    default_eff_for_model = WORKER_MODEL_CATALOG.get(saved_model, {}).get("default_effort", DEFAULT_WORKER_EFFORT)
+    saved_effort = get_system_setting("worker_effort", default_eff_for_model) or default_eff_for_model
+
+    if effort_override and effort_override.strip().lower() in VALID_WORKER_EFFORTS:
+        saved_effort = effort_override.strip().lower()
+
+    return saved_model, saved_effort
 
 
 async def run_ssh_worker_command(
@@ -873,6 +969,8 @@ async def run_ssh_worker_command(
     mode: str = "sync",
     on_input_required: Any | None = None,
     on_critical_error: Any | None = None,
+    model_override: str | None = None,
+    effort_override: str | None = None,
 ) -> tuple[int, str, str]:
     """Helper base para ejecutar el Antigravity Worker mediante SSH en el host."""
     clean_project = target_project.strip().lstrip("~").lstrip("/")
@@ -889,10 +987,12 @@ async def run_ssh_worker_command(
     timeout_seconds = get_worker_async_timeout() if mode == "async" else get_worker_sync_timeout()
     timeout_flag = format_duration_for_agy(timeout_seconds)
 
+    active_model, active_effort = get_active_worker_config(model_override, effort_override)
+
     cmd_flags = (
         "--dangerously-skip-permissions "
-        "--model gemini-3.8-flash-medium "
-        "--effort medium "
+        f"--model {shlex.quote(active_model)} "
+        f"--effort {shlex.quote(active_effort)} "
         f"--print-timeout {timeout_flag} "
         "--output-format stream-json"
     )
@@ -1040,7 +1140,14 @@ async def run_ssh_worker_command(
     return proc.returncode, stdout_str, stderr_str
 
 
-async def run_background_worker_task(user_id: str, chat_id: str, task: str, target_project: str):
+async def run_background_worker_task(
+    user_id: str,
+    chat_id: str,
+    task: str,
+    target_project: str,
+    model_override: str | None = None,
+    effort_override: str | None = None,
+):
     """Tarea en segundo plano para Workers asíncronos con reportes de estado a Telegram."""
     worker_id = f"worker_{uuid.uuid4().hex[:8]}"
     register_background_worker(worker_id, user_id, chat_id, task, target_project)
@@ -1146,6 +1253,8 @@ async def run_background_worker_task(user_id: str, chat_id: str, task: str, targ
         mode="async",
         on_input_required=handle_input_required,
         on_critical_error=handle_critical_error,
+        model_override=model_override,
+        effort_override=effort_override,
     )
     await status_q.put(None)
     reporter_task.cancel()
@@ -1166,18 +1275,92 @@ async def run_background_worker_task(user_id: str, chat_id: str, task: str, targ
 
 
 @tool
+async def manage_worker_model(
+    action: str = "status",
+    model_name: str | None = None,
+    effort: str | None = None,
+    user_id: Annotated[str, InjectedState("user_id")] = "",
+) -> str:
+    """Consulta, lista o cambia el modelo LLM predeterminado del Agente Worker (Antigravity `agy` CLI).
+    - action='status': Muestra el modelo y effort actualmente configurados como predeterminados.
+    - action='list': Lista el catálogo completo de modelos soportados por `agy` y cuál está activo.
+    - action='set': Cambia de forma persistente el modelo predeterminado del Worker (acepta nombres exactos o alias como 'sonnet high', 'opus medium', 'gemini 4 argon', 'flash medium').
+    - action='reset': Restaura el modelo predeterminado a `gemini-3.8-flash-medium` (effort `medium`)."""
+    act = (action or "status").strip().lower()
+    current_model, current_effort = get_active_worker_config()
+    current_label = WORKER_MODEL_CATALOG.get(current_model, {}).get("label", current_model)
+
+    if act == "status":
+        return (
+            f"🧠 **Configuración actual del Antigravity Worker**:\n\n"
+            f"• **Modelo activo:** `{current_model}` ({current_label})\n"
+            f"• **Effort:** `{current_effort}`\n\n"
+            f"💡 Podés pedirme listar todos los modelos disponibles o cambiarlo cuando quieras."
+        )
+
+    if act == "list":
+        lines = [
+            "📋 **Modelos disponibles para el Antigravity Worker (`agy`)**:\n",
+            f"🎯 **Activo actualmente:** `{current_model}` (effort: `{current_effort}`)\n",
+        ]
+        for m_id, info in WORKER_MODEL_CATALOG.items():
+            marker = "✅" if m_id == current_model else "•"
+            lines.append(f"{marker} `{m_id}` — {info['label']} (effort base: `{info['default_effort']}`)")
+        return "\n\n".join(lines)
+
+    user_lower = str(user_id).strip().lower()
+    if user_lower not in ALLOWED_WORKER_USERS:
+        return "⛔ No tenés permisos para modificar el modelo predeterminado del Worker Antigravity."
+
+    if act == "reset":
+        set_system_setting("worker_model", DEFAULT_WORKER_MODEL)
+        set_system_setting("worker_effort", DEFAULT_WORKER_EFFORT)
+        return (
+            f"🔄 **Modelo del Worker restaurado al valor por defecto**:\n\n"
+            f"• **Modelo:** `{DEFAULT_WORKER_MODEL}`\n"
+            f"• **Effort:** `{DEFAULT_WORKER_EFFORT}`"
+        )
+
+    if act == "set":
+        if not model_name or not model_name.strip():
+            return "⚠️ Indicá qué modelo querés configurar (ej: `claude-sonnet-5-5-high`, `gemini-4-argon-medium`, `gemini-3.8-flash-medium`)."
+
+        resolved = resolve_worker_model_and_effort(model_name, effort)
+        if not resolved:
+            available = ", ".join(f"`{k}`" for k in WORKER_MODEL_CATALOG)
+            return f"⚠️ No pude reconocer el modelo `{model_name}`.\n\n**Modelos disponibles:**\n{available}"
+
+        new_model, new_effort = resolved
+        set_system_setting("worker_model", new_model)
+        set_system_setting("worker_effort", new_effort)
+        new_label = WORKER_MODEL_CATALOG.get(new_model, {}).get("label", new_model)
+
+        return (
+            f"✅ **Modelo del Antigravity Worker actualizado con éxito**:\n\n"
+            f"• **Nuevo modelo:** `{new_model}` ({new_label})\n"
+            f"• **Effort:** `{new_effort}`\n"
+            f"• **Persistencia:** Guardado en SQLite (se mantiene tras reinicios)."
+        )
+
+    return f"⚠️ Acción `{action}` no reconocida. Usá 'status', 'list', 'set' o 'reset'."
+
+
+@tool
 async def call_antigravity_worker(
     task: str,
     target_project: str,
     mode: str = "sync",
-    user_id: Annotated[str, InjectedState("user_id")] = "fsirio",
+    model_override: str | None = None,
+    user_id: Annotated[str, InjectedState("user_id")] = "",
     thread_id: Annotated[str, InjectedState("thread_id")] = "",
 ) -> str:
     """Invoca al Agente Worker (Antigravity) para ejecutar tareas autónomas en el host homelab.
     - Modo 'sync': Para tareas cortas o consultas rápidas con respuesta inmediata en el chat.
     - Modo 'async': Para tareas largas, refactors o pipelines en segundo plano con notificación de avance a Telegram.
-    - SEGURIDAD: Exclusivo para 'fsirio'. Si un usuario no autorizado (ej: Mercedes) lo solicita, se genera un plan para aprobación humana."""
-    user_lower = str(user_id).lower()
+    - model_override: Opcional. Permite usar un modelo específico solo para esta tarea (ej: 'claude-opus-5-5-high', 'sonnet high') sin alterar el predeterminado.
+    - SEGURIDAD: Exclusivo para usuarios autorizados. Si un usuario no autorizado (ej: Mercedes) lo solicita, se genera un plan para aprobación humana."""
+    user_lower = str(user_id).strip().lower()
+    active_model, active_effort = get_active_worker_config(model_override=model_override)
 
     # CONTROL DE ACCESO HITL: Si es Mercedes u otro no autorizado -> Generar Plan de Aprobación
     if user_lower not in ALLOWED_WORKER_USERS:
@@ -1214,7 +1397,11 @@ async def call_antigravity_worker(
     if mode == "async":
         asyncio.create_task(
             run_background_worker_task(
-                user_id=user_id, chat_id=str(thread_id), task=task, target_project=target_project
+                user_id=user_id,
+                chat_id=str(thread_id),
+                task=task,
+                target_project=target_project,
+                model_override=model_override,
             )
         )
         progress_mode = get_worker_progress_mode()
@@ -1229,21 +1416,28 @@ async def call_antigravity_worker(
             f"🚀 **Antigravity Worker lanzado en segundo plano (modo async)**.\n\n"
             f"• **Tarea:** {task}\n"
             f"• **Proyecto:** `{target_project or 'workspace'}`\n"
+            f"• **Modelo:** `{active_model}` (effort: `{active_effort}`)\n"
             f"• **Seguimiento:** {tracking_msg}"
         )
 
     # Modo Síncrono (sync)
     q = ACTIVE_STATUS_QUEUES.get(str(thread_id))
     if q:
-        await q.put(f"🚀 Worker Antigravity iniciado en {target_project or 'workspace'}...")
+        await q.put(f"🚀 Worker Antigravity (`{active_model}`) iniciado en {target_project or 'workspace'}...")
 
-    code, stdout_str, stderr_str = await run_ssh_worker_command(task, target_project, q=q, mode="sync")
+    code, stdout_str, stderr_str = await run_ssh_worker_command(
+        task,
+        target_project,
+        q=q,
+        mode="sync",
+        model_override=model_override,
+    )
 
     if code == 0:
         if q:
             await q.put("✅ Worker completado con éxito.")
-        return f"✅ **Tarea de Antigravity completada con éxito**:\n\n{stdout_str}"
-    return f"⚠️ **Antigravity Worker finalizó con error** (código {code}):\n{stdout_str}\n{stderr_str}"
+        return f"✅ **Tarea de Antigravity completada con éxito** (`{active_model}`):\n\n{stdout_str}"
+    return f"⚠️ **Antigravity Worker finalizó con error** (código {code}, modelo `{active_model}`):\n{stdout_str}\n{stderr_str}"
 
 
 tools = [
@@ -1260,6 +1454,7 @@ tools = [
     schedule_task,
     list_scheduled_tasks,
     cancel_scheduled_task,
+    manage_worker_model,
     call_antigravity_worker,
 ]
 tool_node = ToolNode(tools)
@@ -1355,10 +1550,10 @@ async def supervisor_node(state: AgentState):
         "   - `get_weather_forecast`: Check weather forecast for Tigre, Buenos Aires or other locations.\n"
         "   - `schedule_task`: Schedule delayed tasks, weather alerts, or reminders (zero tokens while waiting).\n"
         "   - `list_scheduled_tasks`, `cancel_scheduled_task`: Manage scheduled jobs.\n"
-        "4. Antigravity Worker (`call_antigravity_worker`):\n"
-        "   - Executes engineering tasks, refactors, script executions, or terminal commands on host.\n"
-        "   - Supports mode='sync' (fast tasks) and mode='async' (long-running background jobs with Telegram progress updates).\n"
-        "   - SECURITY / HITL POLICY: Only 'fsirio' can directly execute workers. If any other user (like 'mercedes') asks for engineering or host execution, call `call_antigravity_worker` and it will automatically generate a Plan for Fsirio's approval.\n\n"
+        "4. Antigravity Worker (`call_antigravity_worker` & `manage_worker_model`):\n"
+        "   - `call_antigravity_worker`: Executes engineering tasks, refactors, script executions, or terminal commands on host. Supports mode='sync' and mode='async', plus optional `model_override` for one-off model selection.\n"
+        "   - `manage_worker_model`: Check current worker model (`action='status'`), list available `agy` models (`action='list'`), change the persistent default worker model (`action='set'`, e.g. `model_name='claude-sonnet-5-5-high'` or `'gemini-4-argon-medium'`), or reset to default (`action='reset'`).\n"
+        "   - SECURITY / HITL POLICY: Only 'fsirio' can directly execute workers or change the worker model. If any other user (like 'mercedes') asks for engineering or host execution, call `call_antigravity_worker` and it will automatically generate a Plan for Fsirio's approval.\n\n"
         "LANGUAGE POLICY:\n"
         "Always respond in the same language the user is speaking (Spanish if Spanish, English if English).\n\n"
         "FORMATTING RULES for Telegram:\n"

@@ -112,6 +112,15 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications_history (created_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notifications_agent ON notifications_history (agent_id)")
 
+    # System settings key-value table (e.g. worker_model, worker_effort)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     for tid, pid in CANONICAL_USERS.items():
         cursor.execute(
             """
@@ -463,3 +472,40 @@ def get_notification_stats(since: str | None = None) -> dict[str, Any]:
         "by_agent": by_agent,
         "by_status": by_status,
     }
+
+
+# --- System Settings DB Helpers ---
+
+
+def get_system_setting(key: str, default: str | None = None) -> str | None:
+    """Retrieves a persistent system setting by key from SQLite."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        return row[0] if row else default
+    except sqlite3.OperationalError:
+        return default
+    finally:
+        conn.close()
+
+
+def set_system_setting(key: str, value: str) -> None:
+    """Persists or updates a system setting in SQLite."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (key, value),
+        )
+        conn.commit()
+    finally:
+        conn.close()
