@@ -7,41 +7,81 @@ import os
 import re
 import shlex
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
+import aiosqlite
 import google.generativeai as genai
 import httpx
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from db import (
-    complete_background_worker,
-    create_approval_plan,
-    get_approval_plan,
-    get_notification_stats,
-    get_notifications,
-    get_scheduled_task_by_job_id,
-    get_system_setting,
-    get_telegram_id,
-    get_user_mapping,
-    init_db,
-    list_active_scheduled_tasks,
-    log_notification,
-    register_background_worker,
-    register_scheduled_task,
-    register_user,
-    set_system_setting,
-    update_approval_plan_status,
-    update_background_worker_progress,
-    update_scheduled_task_status,
-)
+
+try:
+    from db import (
+        CHECKPOINTS_DB_PATH,
+        complete_background_worker,
+        create_approval_plan,
+        get_approval_plan,
+        get_chat_messages,
+        get_notification_stats,
+        get_notifications,
+        get_pending_for_ingest,
+        get_scheduled_task_by_job_id,
+        get_system_setting,
+        get_telegram_id,
+        get_user_mapping,
+        init_db,
+        insert_chat_message,
+        list_active_scheduled_tasks,
+        log_notification,
+        mark_ingested,
+        register_background_worker,
+        register_scheduled_task,
+        register_user,
+        set_system_setting,
+        update_approval_plan_status,
+        update_background_worker_progress,
+        update_scheduled_task_status,
+    )
+    from state_pruning import prune_state_if_needed
+except ImportError:
+    from app.db import (
+        CHECKPOINTS_DB_PATH,
+        complete_background_worker,
+        create_approval_plan,
+        get_approval_plan,
+        get_chat_messages,
+        get_notification_stats,
+        get_notifications,
+        get_pending_for_ingest,
+        get_scheduled_task_by_job_id,
+        get_system_setting,
+        get_telegram_id,
+        get_user_mapping,
+        init_db,
+        insert_chat_message,
+        list_active_scheduled_tasks,
+        log_notification,
+        mark_ingested,
+        register_background_worker,
+        register_scheduled_task,
+        register_user,
+        set_system_setting,
+        update_approval_plan_status,
+        update_background_worker_progress,
+        update_scheduled_task_status,
+    )
+    from app.state_pruning import prune_state_if_needed
+
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, Header, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import InjectedState, ToolNode
 from llm_factory import get_chat_model
@@ -52,6 +92,14 @@ load_dotenv()
 
 # Active Status Queues for Streaming Progress
 ACTIVE_STATUS_QUEUES: dict[str, asyncio.Queue] = {}
+
+# Thread-level locks to serialize graph execution and proactive state updates
+THREAD_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def get_thread_lock(thread_id: str) -> asyncio.Lock:
+    """Retrieves or creates a dedicated asyncio.Lock for a given thread_id."""
+    return THREAD_LOCKS.setdefault(str(thread_id), asyncio.Lock())
 
 
 class JsonFormatter(logging.Formatter):
@@ -190,26 +238,11 @@ DB_PATH = Path(__file__).parent / "data" / "orchestrator.db"
 jobstores = {"default": SQLAlchemyJobStore(url=f"sqlite:///{DB_PATH.resolve()}")}
 scheduler = AsyncIOScheduler(jobstores=jobstores, timezone="America/Argentina/Buenos_Aires")
 
-app = FastAPI(title="Telegram Agent Orchestrator")
-
 
 async def heartbeat_loop():
     while True:
         logging.info("💓 Heartbeat: Orchestrator API is active and listening")
         await asyncio.sleep(600)
-
-
-@app.on_event("startup")
-async def startup_event():
-    scheduler.start()
-    logger.info("⏰ APScheduler started with SQLite persistent jobstore.")
-    asyncio.create_task(heartbeat_loop())
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    scheduler.shutdown()
-    logger.info("⏰ APScheduler shutdown cleanly.")
 
 
 # --- Notification Helper ---
@@ -1581,8 +1614,6 @@ def should_continue(state: AgentState):
     return END
 
 
-memory = MemorySaver()
-
 workflow = StateGraph(AgentState)
 workflow.add_node("router", node_router)
 workflow.add_node("biometric_expert", biometric_expert_node)
@@ -1597,7 +1628,104 @@ workflow.add_edge("biometric_expert", END)
 workflow.add_conditional_edges("supervisor", should_continue, {"tools": "tools", END: END})
 workflow.add_edge("tools", "supervisor")
 
-graph = workflow.compile(checkpointer=memory)
+graph: Any = None
+
+
+def get_graph() -> Any:
+    """Returns the compiled LangGraph instance.
+
+    If accessed before lifespan initialization (e.g. in test suite),
+    falls back to a temporary MemorySaver instance.
+    """
+    global graph
+    if graph is not None:
+        return graph
+    logger.warning("Graph accessed before lifespan initialization; compiling fallback MemorySaver")
+    graph = workflow.compile(checkpointer=MemorySaver())
+    return graph
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # APScheduler Startup
+    scheduler.start()
+    logger.info("⏰ APScheduler started with SQLite persistent jobstore.")
+    heartbeat_task = asyncio.create_task(heartbeat_loop())
+
+    # Persistent Checkpointer setup (AsyncSqliteSaver + WAL)
+    CHECKPOINTS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    checkpoints_conn = await aiosqlite.connect(str(CHECKPOINTS_DB_PATH))
+    await checkpoints_conn.execute("PRAGMA journal_mode=WAL;")
+    await checkpoints_conn.execute("PRAGMA busy_timeout=5000;")
+    await checkpoints_conn.commit()
+
+    checkpointer = AsyncSqliteSaver(checkpoints_conn)
+    await checkpointer.setup()
+
+    compiled_graph = workflow.compile(checkpointer=checkpointer)
+    app.state.graph = compiled_graph
+    global graph
+    graph = compiled_graph
+    logger.info("🧠 LangGraph compiled with persistent AsyncSqliteSaver (WAL mode).")
+
+    yield
+
+    heartbeat_task.cancel()
+    scheduler.shutdown()
+    logger.info("⏰ APScheduler shutdown cleanly.")
+    await checkpoints_conn.close()
+    logger.info("🔒 Checkpoints SQLite connection closed.")
+
+
+app = FastAPI(title="Telegram Agent Orchestrator", lifespan=lifespan)
+
+
+async def record_proactive_notification(
+    agent_id: str,
+    user_id: str,
+    message: str,
+    chat_id: str | None = None,
+    graph_instance: Any = None,
+) -> None:
+    """Records a proactive notification into chat_messages and injects it into LangGraph state."""
+    try:
+        resolved_chat_id = chat_id or get_telegram_id(user_id)
+        if not resolved_chat_id and str(user_id).isdigit():
+            resolved_chat_id = str(user_id)
+
+        if not resolved_chat_id:
+            logger.warning(
+                f"Could not resolve telegram chat_id/thread_id for user '{user_id}' "
+                f"to inject proactive notification from agent '{agent_id}'"
+            )
+            return
+
+        notif_content = f"[Notificación de {agent_id}]: {message}"
+        insert_chat_message(
+            thread_id=str(resolved_chat_id),
+            user_id=str(user_id),
+            role="assistant",
+            content=notif_content,
+            intent="notification",
+            source="notification",
+        )
+
+        target_graph = graph_instance
+        if target_graph is None:
+            if hasattr(app, "state") and hasattr(app.state, "graph") and app.state.graph:
+                target_graph = app.state.graph
+            else:
+                target_graph = get_graph()
+
+        if target_graph:
+            async with get_thread_lock(str(resolved_chat_id)):
+                config = {"configurable": {"thread_id": str(resolved_chat_id)}}
+                await target_graph.aupdate_state(config, {"messages": [AIMessage(content=notif_content)]})
+                logger.info(
+                    f"Proactive notification from {agent_id} injected into graph state for thread_id={resolved_chat_id}"
+                )
+    except Exception as e:
+        logger.warning(f"Failed to record proactive notification or update graph state: {e}")
 
 
 # --- Message Processor for HTML ---
@@ -1798,10 +1926,41 @@ async def notify(payload: NotificationPayload):
         chunks_sent=res.chunks_sent,
     )
 
+    await record_proactive_notification(
+        agent_id=payload.agent_id,
+        user_id=payload.user_id,
+        message=formatted_message,
+        chat_id=res.chat_id,
+    )
+
     return {
         "status": "success" if res.success else "error",
         "telegram_message_id": res.telegram_message_id,
     }
+
+
+@app.get("/api/messages")
+async def list_messages_endpoint(
+    thread_id: str | None = None,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    source: str | None = None,
+    ingested_to_brain: int | None = None,
+):
+    """Retrieves chat messages from the persistent database with optional filters.
+
+    Supports filtering by thread_id, source ('chat' or 'notification'), and
+    brain ingestion status (0 or 1), with pagination (limit up to 500, offset).
+    """
+    clean_thread_id = thread_id.strip() if thread_id and thread_id.strip() else None
+    clean_source = source.strip() if source and source.strip() else None
+    return get_chat_messages(
+        thread_id=clean_thread_id,
+        limit=limit,
+        offset=offset,
+        source=clean_source,
+        ingested_to_brain=ingested_to_brain,
+    )
 
 
 @app.get("/api/notifications")
@@ -1896,6 +2055,13 @@ async def notify_crowdsec(request: Request, user_id: str = "fsirio"):
         chunks_sent=res.chunks_sent,
     )
 
+    await record_proactive_notification(
+        agent_id="crowdsec",
+        user_id=target_user,
+        message=formatted_message,
+        chat_id=res.chat_id,
+    )
+
     return {
         "status": "success" if res.success else "error",
         "telegram_message_id": res.telegram_message_id,
@@ -1961,6 +2127,13 @@ async def notify_alertmanager(request: Request, user_id: str = "fsirio"):
         error=res.error,
         chunks_total=res.chunks_total,
         chunks_sent=res.chunks_sent,
+    )
+
+    await record_proactive_notification(
+        agent_id="alertmanager",
+        user_id=target_user,
+        message=formatted_message,
+        chat_id=res.chat_id,
     )
 
     return {
@@ -2145,61 +2318,94 @@ async def chat_stream(
     initial_messages = [HumanMessage(content=full_user_prompt)]
 
     async def event_generator():
-        config = {"configurable": {"thread_id": thread_id}}
-        status_queue = asyncio.Queue()
-        ACTIVE_STATUS_QUEUES[str(thread_id)] = status_queue
+        target_graph = (
+            _request.app.state.graph
+            if hasattr(_request, "app")
+            and hasattr(_request.app, "state")
+            and hasattr(_request.app.state, "graph")
+            and _request.app.state.graph
+            else get_graph()
+        )
+        config = {"configurable": {"thread_id": str(thread_id)}}
 
-        state = {
-            "messages": initial_messages,
-            "user_id": x_user_id,
-            "thread_id": thread_id,
-            "loop_count": 0,
-        }
+        async with get_thread_lock(str(thread_id)):
+            # 1. Save user message to persistent SQLite chat_messages table
+            insert_chat_message(
+                thread_id=str(thread_id),
+                user_id=str(x_user_id),
+                role="user",
+                content=full_user_prompt,
+                intent=None,
+                source="chat",
+            )
 
-        async def run_graph():
-            try:
-                await graph.ainvoke(state, config=config)
-            except Exception as e:
-                logger.error(f"Error executing LangGraph: {e}")
-            finally:
-                await status_queue.put(None)
+            # 2. Prune conversation state if exceeding HWM (24 -> 10)
+            await prune_state_if_needed(target_graph, config)
 
-        graph_task = asyncio.create_task(run_graph())
+            status_queue = asyncio.Queue()
+            ACTIVE_STATUS_QUEUES[str(thread_id)] = status_queue
 
-        while True:
-            try:
-                status_item = await asyncio.wait_for(status_queue.get(), timeout=2.5)
-                if status_item is None:
-                    break
-                yield f"data: {json.dumps({'status': status_item})}\n\n"
-            except asyncio.TimeoutError:
-                if graph_task.done():
-                    break
-                yield f"data: {json.dumps({'status': '⚙️ Analizando solicitud...'})}\n\n"
+            state = {
+                "messages": initial_messages,
+                "user_id": x_user_id,
+                "thread_id": str(thread_id),
+                "loop_count": 0,
+            }
 
-        await graph_task
-        ACTIVE_STATUS_QUEUES.pop(str(thread_id), None)
+            async def run_graph():
+                try:
+                    await target_graph.ainvoke(state, config=config)
+                except Exception as e:
+                    logger.error(f"Error executing LangGraph: {e}")
+                finally:
+                    await status_queue.put(None)
 
-        final_state = await graph.aget_state(config)
-        final_msg_obj = final_state.values["messages"][-1]
+            graph_task = asyncio.create_task(run_graph())
 
-        if isinstance(final_msg_obj.content, list):
-            parts = []
-            for c in final_msg_obj.content:
-                if isinstance(c, dict):
-                    if "text" in c:
-                        parts.append(c["text"])
-                else:
-                    parts.append(str(c))
-            final_message = "".join(parts).strip()
-        else:
-            final_message = str(final_msg_obj.content)
+            while True:
+                try:
+                    status_item = await asyncio.wait_for(status_queue.get(), timeout=2.5)
+                    if status_item is None:
+                        break
+                    yield f"data: {json.dumps({'status': status_item})}\n\n"
+                except asyncio.TimeoutError:
+                    if graph_task.done():
+                        break
+                    yield f"data: {json.dumps({'status': '⚙️ Analizando solicitud...'})}\n\n"
 
-        chunk_size = 100
-        for i in range(0, len(final_message), chunk_size):
-            yield f"data: {json.dumps({'text': final_message[i : i + chunk_size]})}\n\n"
+            await graph_task
+            ACTIVE_STATUS_QUEUES.pop(str(thread_id), None)
 
-        yield "data: [DONE]\n\n"
+            final_state = await target_graph.aget_state(config)
+            final_msg_obj = final_state.values["messages"][-1]
+
+            if isinstance(final_msg_obj.content, list):
+                parts = []
+                for c in final_msg_obj.content:
+                    if isinstance(c, dict):
+                        if "text" in c:
+                            parts.append(c["text"])
+                    else:
+                        parts.append(str(c))
+                final_message = "".join(parts).strip()
+            else:
+                final_message = str(final_msg_obj.content)
+
+            detected_intent = final_state.values.get("intent") if hasattr(final_state, "values") else None
+            insert_chat_message(
+                thread_id=str(thread_id),
+                user_id=str(x_user_id),
+                role="assistant",
+                content=final_message,
+                intent=detected_intent,
+                source="chat",
+            )
+
+            chunk_size = 100
+            for i in range(0, len(final_message), chunk_size):
+                yield f"data: {json.dumps({'text': final_message[i : i + chunk_size]})}\n\n"
+
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
