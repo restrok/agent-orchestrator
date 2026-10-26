@@ -22,6 +22,8 @@ def test_crowdsec_adapter_single_alert():
         mock_post.return_value = mock_resp
 
         payload = {
+            "service": "crowdsec",
+            "user_id": "12345678",
             "scenario": "crowdsecurity/ssh-bf",
             "source": {"ip": "192.168.1.100", "as_name": "TestISP"},
             "message": "Ip 192.168.1.100 performed ssh-bf",
@@ -29,7 +31,7 @@ def test_crowdsec_adapter_single_alert():
             "events_count": 5,
         }
 
-        response = client.post("/api/notify/crowdsec?user_id=12345678", json=payload)
+        response = client.post("/api/notify", json=payload)
         assert response.status_code == 200
         assert response.json()["status"] == "success"
         assert response.json()["telegram_message_id"] == "101"
@@ -57,7 +59,7 @@ def test_crowdsec_adapter_list_payload():
             }
         ]
 
-        response = client.post("/api/notify/crowdsec?user_id=12345678", json=payload)
+        response = client.post("/api/notify?service=crowdsec&user_id=12345678", json=payload)
         assert response.status_code == 200
         assert response.json()["status"] == "success"
 
@@ -96,7 +98,7 @@ def test_alertmanager_adapter():
             ],
         }
 
-        response = client.post("/api/notify/alertmanager?user_id=12345678", json=payload)
+        response = client.post("/api/notify?service=alertmanager&user_id=12345678", json=payload)
         assert response.status_code == 200
         assert response.json()["status"] == "success"
         assert response.json()["telegram_message_id"] == "201"
@@ -109,3 +111,8 @@ def test_alertmanager_adapter():
         assert "HostHighCpuLoad" in record["message"]
         assert "thinkcentre-01" in record["message"]
         assert "CPU usage has exceeded 90%" in record["message"]
+
+
+def test_removed_legacy_subendpoints_return_404():
+    assert client.post("/api/notify/crowdsec", json={}).status_code == 404
+    assert client.post("/api/notify/alertmanager", json={}).status_code == 404
