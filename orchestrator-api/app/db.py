@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 DB_DIR = Path(__file__).parent / "data"
 DB_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DB_DIR / "orchestrator.db"
+CHECKPOINTS_DB_PATH = DB_DIR / "checkpoints.db"
 
 
 def _load_env_json(var_name: str) -> dict[str, str]:
@@ -120,6 +121,23 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Chat messages persistence
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            role TEXT NOT NULL,              -- 'user' | 'assistant'
+            content TEXT NOT NULL,
+            intent TEXT,
+            source TEXT NOT NULL DEFAULT 'chat',   -- 'chat' | 'notification'
+            ingested_to_brain INTEGER NOT NULL DEFAULT 0
+        );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_pending ON chat_messages(ingested_to_brain, id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(thread_id, id);")
 
     for tid, pid in CANONICAL_USERS.items():
         cursor.execute(
@@ -509,3 +527,100 @@ def set_system_setting(key: str, value: str) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+# --- Chat Messages Persistence Helpers ---
+
+
+def insert_chat_message(
+    thread_id: str,
+    user_id: str,
+    role: str,
+    content: str,
+    intent: str | None = None,
+    source: str = "chat",
+) -> int:
+    """Inserts a new chat message into chat_messages table and returns its id."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    created_at = datetime.now(timezone.utc).isoformat()
+    cursor.execute(
+        """
+        INSERT INTO chat_messages (created_at, thread_id, user_id, role, content, intent, source, ingested_to_brain)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+        """,
+        (created_at, str(thread_id), str(user_id), role, content, intent, source),
+    )
+    msg_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return msg_id
+
+
+def get_chat_messages(
+    thread_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    source: str | None = None,
+    ingested_to_brain: int | None = None,
+) -> list[dict[str, Any]]:
+    """Retrieves chat messages filtered by thread_id, source, and/or ingested_to_brain."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    query = "SELECT * FROM chat_messages"
+    conditions = []
+    params: list[Any] = []
+
+    if thread_id is not None:
+        conditions.append("thread_id = ?")
+        params.append(str(thread_id))
+    if source is not None:
+        conditions.append("source = ?")
+        params.append(source)
+    if ingested_to_brain is not None:
+        conditions.append("ingested_to_brain = ?")
+        params.append(ingested_to_brain)
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    query += " ORDER BY id ASC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    cursor.execute(query, params)
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_pending_for_ingest(limit: int = 500) -> list[dict[str, Any]]:
+    """Retrieves messages pending to be ingested into the brain knowledge base."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM chat_messages WHERE ingested_to_brain = 0 ORDER BY id ASC LIMIT ?",
+        (limit,),
+    )
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def mark_ingested(message_ids: list[int]) -> int:
+    """Marks a list of message IDs as ingested (ingested_to_brain = 1)."""
+    if not message_ids:
+        return 0
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    placeholders = ",".join("?" for _ in message_ids)
+    cursor.execute(
+        f"UPDATE chat_messages SET ingested_to_brain = 1 WHERE id IN ({placeholders})",
+        message_ids,
+    )
+    updated = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return updated
