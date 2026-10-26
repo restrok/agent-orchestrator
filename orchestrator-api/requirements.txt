@@ -10,3 +10,5 @@ python-multipart
 langchain-openai
 apscheduler
 sqlalchemy
+aiosqlite
+langgraph-checkpoint-sqlite

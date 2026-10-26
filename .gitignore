@@ -61,6 +61,7 @@ cover/
 local_settings.py
 *.db
 *.db-journal
+*.bak*
 db.sqlite3
 db.sqlite3-journal
 orchestrator-api/app/data/*.db

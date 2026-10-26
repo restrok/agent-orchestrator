@@ -31,7 +31,12 @@ async def test_cancel_scheduled_task_not_found():
 @pytest.mark.asyncio
 async def test_schedule_task_misfire_grace_time():
     """schedule_task adds job with misfire_grace_time=3600."""
-    with patch("app.main.scheduler.add_job") as mock_add_job, patch("app.main.register_scheduled_task"):
+    with (
+        patch("app.main.scheduler.add_job") as mock_add_job,
+        patch("app.main.register_scheduled_task"),
+        patch("app.main.register_intent_in_brain") as mock_intent,
+    ):
+        mock_intent.ainvoke = AsyncMock(return_value="Intent registered successfully with id test_intent_123")
         res = await schedule_task.coroutine(
             title="Test Task",
             trigger_time_iso="2026-09-30T10:00:00-03:00",
@@ -44,6 +49,7 @@ async def test_schedule_task_misfire_grace_time():
         mock_add_job.assert_called_once()
         _, kwargs = mock_add_job.call_args
         assert kwargs.get("misfire_grace_time") == 3600
+        mock_intent.ainvoke.assert_called_once()
 
 
 def test_list_active_scheduled_tasks_reconciliation(tmp_path, monkeypatch):
