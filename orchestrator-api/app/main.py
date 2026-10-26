@@ -769,7 +769,21 @@ async def execute_scheduled_job(
                 {"text": "❌ Cancelar/Cambiar", "callback_data": f"change_plan:{job_id}"},
             ]
         ]
-        await send_telegram_notification(user_id, msg, inline_keyboard=inline_kb)
+        res = await send_telegram_notification(user_id, msg, inline_keyboard=inline_kb)
+        r_chat_id = getattr(res, "chat_id", None) or chat_id
+        log_notification(
+            agent_id="scheduler:weather_check",
+            user_id=user_id,
+            chat_id=r_chat_id,
+            message=msg,
+            parse_mode="HTML",
+            status=getattr(res, "status", "sent"),
+            telegram_message_id=getattr(res, "telegram_message_id", None),
+            error=getattr(res, "error", None),
+            chunks_total=getattr(res, "chunks_total", 1),
+            chunks_sent=getattr(res, "chunks_sent", 1),
+        )
+        await record_proactive_notification("scheduler", user_id, msg, chat_id=r_chat_id)
         if intent_id:
             await update_intent_in_brain.ainvoke(
                 {"intent_id": intent_id, "status": "notified", "context_data": {"forecast_snippet": forecast[:200]}}
@@ -778,7 +792,21 @@ async def execute_scheduled_job(
     elif task_type == "reminder":
         rem_msg = payload.get("message", title)
         msg = f"⏰ <b>Recordatorio: {html.escape(title)}</b>\n\n{html.escape(rem_msg)}"
-        await send_telegram_notification(user_id, msg)
+        res = await send_telegram_notification(user_id, msg)
+        r_chat_id = getattr(res, "chat_id", None) or chat_id
+        log_notification(
+            agent_id="scheduler:reminder",
+            user_id=user_id,
+            chat_id=r_chat_id,
+            message=msg,
+            parse_mode="HTML",
+            status=getattr(res, "status", "sent"),
+            telegram_message_id=getattr(res, "telegram_message_id", None),
+            error=getattr(res, "error", None),
+            chunks_total=getattr(res, "chunks_total", 1),
+            chunks_sent=getattr(res, "chunks_sent", 1),
+        )
+        await record_proactive_notification("scheduler", user_id, msg, chat_id=r_chat_id)
         if intent_id:
             await update_intent_in_brain.ainvoke({"intent_id": intent_id, "status": "notified"})
 
@@ -786,7 +814,21 @@ async def execute_scheduled_job(
         task_prompt = payload.get("task", title)
         target_project = payload.get("target_project", "")
         msg = f"🚀 <b>Ejecutando Tarea Programada de Worker</b>:\n\n<b>Tarea:</b> {html.escape(task_prompt)}\n<b>Proyecto:</b> {html.escape(target_project or 'default')}"
-        await send_telegram_notification(user_id, msg)
+        res = await send_telegram_notification(user_id, msg)
+        r_chat_id = getattr(res, "chat_id", None) or chat_id
+        log_notification(
+            agent_id="scheduler:worker_execute",
+            user_id=user_id,
+            chat_id=r_chat_id,
+            message=msg,
+            parse_mode="HTML",
+            status=getattr(res, "status", "sent"),
+            telegram_message_id=getattr(res, "telegram_message_id", None),
+            error=getattr(res, "error", None),
+            chunks_total=getattr(res, "chunks_total", 1),
+            chunks_sent=getattr(res, "chunks_sent", 1),
+        )
+        await record_proactive_notification("scheduler", user_id, msg, chat_id=r_chat_id)
         # Launch async worker
         asyncio.create_task(
             run_background_worker_task(
@@ -1258,6 +1300,7 @@ async def run_background_worker_task(
             f"<i>{html.escape(detail)}</i>"
         )
         await send_telegram_notification(user_id, msg)
+        await record_proactive_notification("antigravity_worker", user_id, msg, chat_id=str(chat_id))
         update_background_worker_progress(worker_id, f"Requiere input: {detail[:200]}")
 
     last_notified_error = ""
@@ -1277,6 +1320,7 @@ async def run_background_worker_task(
             f"<i>{html.escape(detail)}</i>"
         )
         await send_telegram_notification(user_id, msg)
+        await record_proactive_notification("antigravity_worker", user_id, msg, chat_id=str(chat_id))
         update_background_worker_progress(worker_id, f"Error crítico: {detail[:200]}")
 
     returncode, stdout_str, stderr_str = await run_ssh_worker_command(
@@ -1304,7 +1348,51 @@ async def run_background_worker_task(
             f"❌ <b>Worker Falló (`{worker_id}`)</b>:\n\n<b>Error:</b>\n{html.escape(stderr_str or stdout_str[:500])}"
         )
 
-    await send_telegram_notification(user_id, final_msg)
+    res = await send_telegram_notification(user_id, final_msg)
+    r_chat_id = getattr(res, "chat_id", None) or str(chat_id)
+    log_notification(
+        agent_id="antigravity_worker",
+        user_id=user_id,
+        chat_id=r_chat_id,
+        message=final_msg,
+        parse_mode="HTML",
+        status=getattr(res, "status", "sent"),
+        telegram_message_id=getattr(res, "telegram_message_id", None),
+        error=getattr(res, "error", None),
+        chunks_total=getattr(res, "chunks_total", 1),
+        chunks_sent=getattr(res, "chunks_sent", 1),
+    )
+    await record_proactive_notification("antigravity_worker", user_id, final_msg, chat_id=r_chat_id)
+
+
+@tool
+async def get_conversation_state_info(
+    limit: int = 15,
+    user_id: Annotated[str, InjectedState("user_id")] = "",
+    thread_id: Annotated[str, InjectedState("thread_id")] = "",
+) -> str:
+    """Consulta de forma instantánea y sin usar SSH el resumen del historial persistido (`chat_messages`) y notificaciones recientes de este hilo conversacional."""
+    t_id = str(thread_id or get_telegram_id(user_id) or "")
+    if not t_id:
+        return "No se pudo determinar el thread_id actual."
+    recent_rows = get_chat_messages(thread_id=t_id, limit=500)
+    total_db = len(recent_rows)
+    tail_rows = recent_rows[-max(1, min(limit, 50)) :]
+    lines = [
+        f"🧠 **Estado de Memoria del Hilo (`{t_id}`)**:",
+        f"• **Mensajes registrados en `chat_messages` (SQLite):** {total_db}",
+        f"• **Últimos {len(tail_rows)} mensajes registrados:**",
+    ]
+    for r in tail_rows:
+        src_tag = "🔔 notif" if r.get("source") == "notification" else f"💬 {r.get('role')}"
+        ing_tag = (
+            "✅ vault"
+            if r.get("ingested_to_brain") == 1
+            else ("⏭️ skip" if r.get("ingested_to_brain") == 2 else "⏳ pend")
+        )
+        snippet = str(r.get("content", "")).replace("\n", " ")[:120]
+        lines.append(f"  - `#{r['id']}` [{src_tag} | {ing_tag}] ({r.get('created_at', '')[:19]}): {snippet}")
+    return "\n\n".join(lines)
 
 
 @tool
@@ -1418,6 +1506,7 @@ async def call_antigravity_worker(
             f"<i>¿Deseas autorizar la ejecución del Worker Antigravity?</i>"
         )
         await send_telegram_notification("fsirio", fsirio_msg, inline_keyboard=approval_kb)
+        await record_proactive_notification("hitl_approval", "fsirio", fsirio_msg)
 
         return (
             f"📝 <b>Plan de Trabajo Generado (ID: `{plan_id}`)</b>\n\n"
@@ -1487,6 +1576,7 @@ tools = [
     schedule_task,
     list_scheduled_tasks,
     cancel_scheduled_task,
+    get_conversation_state_info,
     manage_worker_model,
     call_antigravity_worker,
 ]
@@ -1522,9 +1612,17 @@ async def node_router(state: AgentState):
 
     try:
         router_system = SystemMessage(
-            content="Classify the user intent into one of the allowed categories: biometric_expert, exocortex_brain, antigravity_worker, general_chat, unknown. Do not call any external tools."
+            content=(
+                "Classify the user intent into one of the allowed categories: "
+                "biometric_expert, exocortex_brain, antigravity_worker, general_chat, unknown. "
+                "Consider the recent conversation and any preceding '[Notificación de ...]' messages when the user asks a follow-up question. "
+                "Only choose 'antigravity_worker' when the user explicitly requests executing host commands, coding, refactoring, or modifying files/containers. "
+                "Questions about the current conversation, notifications already in context, or the bot's own memory/state should be 'general_chat' or 'exocortex_brain'. "
+                "Do not call any external tools."
+            )
         )
-        classification = await structured_llm.ainvoke([router_system, state["messages"][-1]])
+        recent_context = list(state["messages"][-4:])
+        classification = await structured_llm.ainvoke([router_system] + recent_context)
         return {"intent": classification.intent, "loop_count": 0}
     except Exception as e:
         logger.error(f"Intent classification failed: {e}. Falling back to supervisor.")
@@ -1572,6 +1670,11 @@ async def supervisor_node(state: AgentState):
         f"KNOWLEDGE SPACES FOR USER '{user_id}':\n"
         f"• Available spaces for this user: [{spaces_str}].\n"
         f"• When searching or storing memory, only use or reference these permitted spaces and respect user isolation.\n\n"
+        "CONVERSATION STATE & PROACTIVE NOTIFICATIONS MEMORY (CRITICAL):\n"
+        "• Your conversation state (`AgentState`) is automatically persisted in SQLite (`checkpoints.db` via `AsyncSqliteSaver`) and `chat_messages` (`orchestrator.db`).\n"
+        "• Active context window: keeps up to 24 messages and prunes to the most recent 10 messages (HWM=24 / LWM=10), while older messages are automatically archived into Exocortex Brain by the background `memory_janitor`.\n"
+        "• Proactive notifications from external and internal services (e.g. CrowdSec, Alertmanager, Auto-Healer, Biometric Coach, Scheduler reminders, Background Worker results) are automatically injected into your `state['messages']` formatted as `[Notificación de <agent_id>]: ...`.\n"
+        "• NEVER invoke `call_antigravity_worker` to inspect your own source code, database files, or check whether `AgentState` / notifications exist. Answer questions about the current conversation thread or recent notifications directly from the messages already in your context (or use `get_conversation_state_info` / `search_brain` if needed).\n\n"
         "CAPABILITIES & TOOLS:\n"
         "1. Biometric Expert (`call_biometric_expert`): Consult physiological data, Garmin activities, sleep, HRV, running.\n"
         "2. Exocortex Brain:\n"
@@ -2001,6 +2104,36 @@ async def list_messages_endpoint(
     )
 
 
+@app.get("/api/state/{thread_id}")
+async def get_thread_state_endpoint(thread_id: str, request: Request):
+    """Returns the currently active LangGraph AgentState messages for a given thread_id."""
+    target_graph = (
+        request.app.state.graph
+        if hasattr(request, "app") and hasattr(request.app, "state") and getattr(request.app.state, "graph", None)
+        else get_graph()
+    )
+    config = {"configurable": {"thread_id": str(thread_id)}}
+    state = await target_graph.aget_state(config)
+    msgs = state.values.get("messages", []) if state and getattr(state, "values", None) else []
+    serialized = []
+    for i, m in enumerate(msgs):
+        serialized.append(
+            {
+                "index": i,
+                "type": type(m).__name__,
+                "id": getattr(m, "id", None),
+                "content": m.content,
+                "tool_calls": getattr(m, "tool_calls", None) or [],
+            }
+        )
+    return {
+        "thread_id": str(thread_id),
+        "active_message_count": len(serialized),
+        "intent": state.values.get("intent") if state and getattr(state, "values", None) else None,
+        "messages": serialized,
+    }
+
+
 @app.post("/api/messages/flush")
 async def flush_messages_endpoint():
     """Manual flush endpoint to trigger memory janitor cycle immediately ignoring idle timer."""
@@ -2240,16 +2373,19 @@ async def handle_plan_action(payload: ApprovalActionPayload):
 
     if payload.action == "reject":
         update_approval_plan_status(payload.plan_id, "rejected")
-        await send_telegram_notification(
-            plan["requester_id"], f"❌ Tu plan <b>'{html.escape(plan['title'])}'</b> fue rechazado por Federico."
+        rej_msg = f"❌ Tu plan <b>'{html.escape(plan['title'])}'</b> fue rechazado por Federico."
+        await send_telegram_notification(plan["requester_id"], rej_msg)
+        await record_proactive_notification(
+            "hitl_approval", plan["requester_id"], rej_msg, chat_id=str(plan["requester_telegram_id"])
         )
         return {"status": "success", "action": "rejected"}
 
     if payload.action == "approve":
         update_approval_plan_status(payload.plan_id, "approved")
-        await send_telegram_notification(
-            plan["requester_id"],
-            f"✅ Tu plan <b>'{html.escape(plan['title'])}'</b> fue aprobado por Federico. Iniciando ejecución...",
+        app_msg = f"✅ Tu plan <b>'{html.escape(plan['title'])}'</b> fue aprobado por Federico. Iniciando ejecución..."
+        await send_telegram_notification(plan["requester_id"], app_msg)
+        await record_proactive_notification(
+            "hitl_approval", plan["requester_id"], app_msg, chat_id=str(plan["requester_telegram_id"])
         )
 
         # Disparar ejecución en background
@@ -2264,6 +2400,32 @@ async def handle_plan_action(payload: ApprovalActionPayload):
         return {"status": "success", "action": "approved_and_launched"}
 
     return JSONResponse({"status": "error", "message": "Acción inválida"}, status_code=400)
+
+
+class CallbackActionPayload(BaseModel):
+    job_id: str
+    action: str  # keep_plan, change_plan
+    user_id: str
+    chat_id: str | None = None
+
+
+@app.post("/api/callbacks/action")
+async def handle_callback_action(payload: CallbackActionPayload):
+    """Registra en chat_messages y en el AgentState de LangGraph las decisiones tomadas vía botones inline de alertas programadas."""
+    if payload.action == "keep_plan":
+        summary_msg = f"🥩 Plan confirmado por {payload.user_id} (Job `{payload.job_id}`): Asado / actividad en marcha."
+    elif payload.action == "change_plan":
+        summary_msg = f"❌ Plan modificado o cancelado por {payload.user_id} (Job `{payload.job_id}`)."
+    else:
+        return JSONResponse({"status": "error", "message": "Acción de callback inválida"}, status_code=400)
+
+    await record_proactive_notification(
+        agent_id="telegram_callback",
+        user_id=payload.user_id,
+        message=summary_msg,
+        chat_id=payload.chat_id,
+    )
+    return {"status": "success", "action": payload.action}
 
 
 @app.post("/stream")

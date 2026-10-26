@@ -368,6 +368,17 @@ async def handle_callback_query(update: Update, _context: ContextTypes.DEFAULT_T
 
     elif data.startswith("keep_plan:") or data.startswith("change_plan:"):
         act, job_id = data.split(":")
+        with contextlib.suppress(Exception):
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    f"{API_URL}/api/callbacks/action",
+                    json={
+                        "job_id": job_id,
+                        "action": act,
+                        "user_id": platform_user_id,
+                        "chat_id": str(user_id),
+                    },
+                )
         if act == "keep_plan":
             await query.edit_message_text("🥩 <b>Plan confirmado:</b> Asado en marcha.", parse_mode=ParseMode.HTML)
         else:
