@@ -2023,16 +2023,220 @@ async def register(payload: RegisterPayload):
 
 class NotificationPayload(BaseModel):
     user_id: str
-    agent_id: str
+    service: str | None = None
+    agent_id: str | None = None
     message: str
     parse_mode: str | None = "HTML"  # permitir None para texto plano
-    raw: bool = False  # si True, NO anteponer el prefijo "🔔 Notificación (agent_id):"
+    raw: bool = False  # si True, NO anteponer el prefijo "🔔 Notificación (service):"
     inline_keyboard: list[list[dict]] | None = None
     disable_notification: bool = False  # silencioso
 
+    @property
+    def resolved_service(self) -> str:
+        return (self.service or self.agent_id or "").strip()
+
+
+def _format_crowdsec_payload(items: list[Any]) -> str:
+    lines = ["🚨 <b>[ALERTA DE SEGURIDAD - CROWDSEC]</b>\n"]
+    for alert in items:
+        if not isinstance(alert, dict):
+            continue
+        scenario = alert.get("scenario") or alert.get("rule") or "Desconocido"
+        source = alert.get("source")
+        if isinstance(source, dict):
+            src_val = (
+                source.get("value") or source.get("ip") or source.get("cn") or source.get("as_name") or str(source)
+            )
+        else:
+            src_val = str(source) if source else "N/A"
+
+        lines.append(f"🎯 <b>Detección / Escenario:</b> <code>{html.escape(str(scenario))}</code>")
+        lines.append(f"🌐 <b>Origen / IP:</b> <code>{html.escape(str(src_val))}</code>")
+
+        if alert.get("message"):
+            lines.append(f"📝 <b>Mensaje:</b> {html.escape(str(alert['message']))}")
+
+        decisions = alert.get("decisions")
+        if isinstance(decisions, list) and decisions:
+            dec_strs = []
+            for d in decisions:
+                if isinstance(d, dict):
+                    dtype = d.get("type", "ban")
+                    dur = d.get("duration", "")
+                    dec_strs.append(f"{dtype} ({dur})" if dur else str(dtype))
+                else:
+                    dec_strs.append(str(d))
+            lines.append(f"🛡️ <b>Decisión:</b> {html.escape(', '.join(dec_strs))}")
+
+        events_count = alert.get("events_count")
+        if events_count:
+            lines.append(f"🔢 <b>Eventos:</b> {events_count}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def _format_alertmanager_payload(body: dict[str, Any]) -> str:
+    status = (body.get("status") or "firing").upper()
+    status_emoji = "🚨" if status == "FIRING" else "✅"
+    common_labels = body.get("commonLabels") or {}
+    common_annotations = body.get("commonAnnotations") or {}
+    alerts = body.get("alerts") or []
+
+    lines = [f"{status_emoji} <b>[PROMETHEUS ALERTMANAGER - {status}]</b>\n"]
+
+    if common_labels.get("alertname"):
+        lines.append(f"🔔 <b>Alerta:</b> <code>{html.escape(str(common_labels['alertname']))}</code>")
+    if common_labels.get("severity"):
+        lines.append(f"⚠️ <b>Severidad:</b> <code>{html.escape(str(common_labels['severity']))}</code>")
+
+    if alerts and isinstance(alerts, list):
+        lines.append(f"\n<b>Alertas activas ({len(alerts)}):</b>")
+        for i, a in enumerate(alerts, start=1):
+            if not isinstance(a, dict):
+                continue
+            labels = a.get("labels", {})
+            annotations = a.get("annotations", {})
+            aname = labels.get("alertname", f"Alert #{i}")
+            instance = labels.get("instance")
+            summary = annotations.get("summary") or annotations.get("description") or ""
+
+            alert_desc = f"• <b>{html.escape(str(aname))}</b>"
+            if instance:
+                alert_desc += f" (<i>{html.escape(str(instance))}</i>)"
+            if summary:
+                alert_desc += f": {html.escape(str(summary))}"
+            lines.append(alert_desc)
+    elif common_annotations.get("description") or common_annotations.get("summary"):
+        desc = common_annotations.get("description") or common_annotations.get("summary")
+        lines.append(f"\n📝 <b>Detalle:</b> {html.escape(str(desc))}")
+
+    return "\n".join(lines).strip()
+
 
 @app.post("/api/notify")
-async def notify(payload: NotificationPayload):
+async def notify(
+    request: Request,
+    service: str | None = None,
+    user_id: str | None = None,
+):
+    """Endpoint único de notificaciones para todos los servicios externos.
+
+    El servicio emisor se identifica mediante el argumento `service` (en el JSON body
+    o como query parameter `?service=xxx`, manteniendo compatibilidad con `agent_id`).
+    Soporta tanto payloads estándar (`NotificationPayload`) como payloads nativos de
+    webhooks (`service="crowdsec"` y `service="alertmanager"`).
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=422, content={"detail": "Invalid JSON payload"})
+
+    resolved_service = (service or "").strip()
+    if not resolved_service and isinstance(body, dict):
+        resolved_service = str(body.get("service") or body.get("agent_id") or "").strip()
+
+    service_lower = resolved_service.lower()
+
+    # 1. Adaptador nativo de CrowdSec (service="crowdsec" con payload de alerta o lista de alertas)
+    is_crowdsec_native = service_lower == "crowdsec" and (
+        isinstance(body, list)
+        or (isinstance(body, dict) and any(k in body for k in ("scenario", "decisions", "source", "rule")))
+    )
+    if is_crowdsec_native:
+        items = body if isinstance(body, list) else [body]
+        if not items:
+            return {"status": "error", "message": "Empty payload"}
+
+        target_user = str((body.get("user_id") if isinstance(body, dict) else None) or user_id or "fsirio")
+        formatted_message = _format_crowdsec_payload(items)
+        res = await send_telegram_notification(
+            target_user=target_user,
+            message=formatted_message,
+            parse_mode="HTML",
+        )
+        log_notification(
+            agent_id="crowdsec",
+            user_id=target_user,
+            chat_id=res.chat_id,
+            message=formatted_message,
+            parse_mode="HTML",
+            status=res.status,
+            telegram_message_id=res.telegram_message_id,
+            error=res.error,
+            chunks_total=res.chunks_total,
+            chunks_sent=res.chunks_sent,
+        )
+        await record_proactive_notification(
+            agent_id="crowdsec",
+            user_id=target_user,
+            message=formatted_message,
+            chat_id=res.chat_id,
+        )
+        return {
+            "status": "success" if res.success else "error",
+            "telegram_message_id": res.telegram_message_id,
+        }
+
+    # 2. Adaptador nativo de Alertmanager (service="alertmanager" con payload de webhook Prometheus)
+    is_alertmanager_native = (
+        service_lower == "alertmanager"
+        and isinstance(body, dict)
+        and any(k in body for k in ("alerts", "commonLabels", "commonAnnotations", "groupLabels"))
+    )
+    if is_alertmanager_native:
+        target_user = str(body.get("user_id") or user_id or "fsirio")
+        formatted_message = _format_alertmanager_payload(body)
+        res = await send_telegram_notification(
+            target_user=target_user,
+            message=formatted_message,
+            parse_mode="HTML",
+        )
+        log_notification(
+            agent_id="alertmanager",
+            user_id=target_user,
+            chat_id=res.chat_id,
+            message=formatted_message,
+            parse_mode="HTML",
+            status=res.status,
+            telegram_message_id=res.telegram_message_id,
+            error=res.error,
+            chunks_total=res.chunks_total,
+            chunks_sent=res.chunks_sent,
+        )
+        await record_proactive_notification(
+            agent_id="alertmanager",
+            user_id=target_user,
+            message=formatted_message,
+            chat_id=res.chat_id,
+        )
+        return {
+            "status": "success" if res.success else "error",
+            "telegram_message_id": res.telegram_message_id,
+        }
+
+    # 3. Payload estándar de notificación
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=422, content={"detail": "Expected JSON object payload"})
+
+    payload_data = dict(body)
+    if service and not payload_data.get("service"):
+        payload_data["service"] = service
+    if user_id and not payload_data.get("user_id"):
+        payload_data["user_id"] = user_id
+
+    try:
+        payload = NotificationPayload(**payload_data)
+    except Exception as exc:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    svc_id = payload.resolved_service
+    if not svc_id:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "Field 'service' (or 'agent_id') is required to identify the caller service"},
+        )
+
     if payload.raw:
         if payload.parse_mode == "HTML":
             formatted_message = MessageProcessor.decode(payload.message)
@@ -2040,10 +2244,10 @@ async def notify(payload: NotificationPayload):
             formatted_message = payload.message
     else:
         if payload.parse_mode == "HTML":
-            prefix = f"🔔 <b>Notificación ({html.escape(payload.agent_id)})</b>:\n\n"
+            prefix = f"🔔 <b>Notificación ({html.escape(svc_id)})</b>:\n\n"
             formatted_message = f"{prefix}{MessageProcessor.decode(payload.message)}"
         else:
-            prefix = f"🔔 Notificación ({payload.agent_id}):\n\n"
+            prefix = f"🔔 Notificación ({svc_id}):\n\n"
             formatted_message = f"{prefix}{payload.message}"
 
     res = await send_telegram_notification(
@@ -2055,7 +2259,7 @@ async def notify(payload: NotificationPayload):
     )
 
     log_notification(
-        agent_id=payload.agent_id,
+        agent_id=svc_id,
         user_id=payload.user_id,
         chat_id=res.chat_id,
         message=formatted_message,
@@ -2068,7 +2272,7 @@ async def notify(payload: NotificationPayload):
     )
 
     await record_proactive_notification(
-        agent_id=payload.agent_id,
+        agent_id=svc_id,
         user_id=payload.user_id,
         message=formatted_message,
         chat_id=res.chat_id,
@@ -2151,12 +2355,14 @@ async def flush_messages_endpoint():
 
 @app.get("/api/notifications")
 async def list_notifications_endpoint(
+    service: str | None = None,
     agent_id: str | None = None,
     since: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ):
-    clean_agent_id = agent_id.strip() if agent_id and agent_id.strip() else None
+    resolved_svc = service or agent_id
+    clean_agent_id = resolved_svc.strip() if resolved_svc and resolved_svc.strip() else None
     clean_since = since.strip() if since and since.strip() else None
     return get_notifications(
         agent_id=clean_agent_id,
@@ -2172,160 +2378,6 @@ async def notification_stats_endpoint(
 ):
     clean_since = since.strip() if since and since.strip() else None
     return get_notification_stats(since=clean_since)
-
-
-@app.post("/api/notify/crowdsec")
-async def notify_crowdsec(request: Request, user_id: str = "fsirio"):
-    body = await request.json()
-    items = body if isinstance(body, list) else [body]
-    if not items:
-        return {"status": "error", "message": "Empty payload"}
-
-    target_user = user_id
-    if isinstance(body, dict) and body.get("user_id"):
-        target_user = str(body["user_id"])
-
-    lines = ["🚨 <b>[ALERTA DE SEGURIDAD - CROWDSEC]</b>\n"]
-    for alert in items:
-        if not isinstance(alert, dict):
-            continue
-        scenario = alert.get("scenario") or alert.get("rule") or "Desconocido"
-        source = alert.get("source")
-        if isinstance(source, dict):
-            src_val = (
-                source.get("value") or source.get("ip") or source.get("cn") or source.get("as_name") or str(source)
-            )
-        else:
-            src_val = str(source) if source else "N/A"
-
-        lines.append(f"🎯 <b>Detección / Escenario:</b> <code>{html.escape(str(scenario))}</code>")
-        lines.append(f"🌐 <b>Origen / IP:</b> <code>{html.escape(str(src_val))}</code>")
-
-        if alert.get("message"):
-            lines.append(f"📝 <b>Mensaje:</b> {html.escape(str(alert['message']))}")
-
-        decisions = alert.get("decisions")
-        if isinstance(decisions, list) and decisions:
-            dec_strs = []
-            for d in decisions:
-                if isinstance(d, dict):
-                    dtype = d.get("type", "ban")
-                    dur = d.get("duration", "")
-                    dec_strs.append(f"{dtype} ({dur})" if dur else str(dtype))
-                else:
-                    dec_strs.append(str(d))
-            lines.append(f"🛡️ <b>Decisión:</b> {html.escape(', '.join(dec_strs))}")
-
-        events_count = alert.get("events_count")
-        if events_count:
-            lines.append(f"🔢 <b>Eventos:</b> {events_count}")
-        lines.append("")
-
-    formatted_message = "\n".join(lines).strip()
-    res = await send_telegram_notification(
-        target_user=target_user,
-        message=formatted_message,
-        parse_mode="HTML",
-    )
-
-    log_notification(
-        agent_id="crowdsec",
-        user_id=target_user,
-        chat_id=res.chat_id,
-        message=formatted_message,
-        parse_mode="HTML",
-        status=res.status,
-        telegram_message_id=res.telegram_message_id,
-        error=res.error,
-        chunks_total=res.chunks_total,
-        chunks_sent=res.chunks_sent,
-    )
-
-    await record_proactive_notification(
-        agent_id="crowdsec",
-        user_id=target_user,
-        message=formatted_message,
-        chat_id=res.chat_id,
-    )
-
-    return {
-        "status": "success" if res.success else "error",
-        "telegram_message_id": res.telegram_message_id,
-    }
-
-
-@app.post("/api/notify/alertmanager")
-async def notify_alertmanager(request: Request, user_id: str = "fsirio"):
-    body = await request.json()
-    if not isinstance(body, dict):
-        return {"status": "error", "message": "Invalid Alertmanager payload"}
-
-    target_user = str(body.get("user_id") or user_id)
-    status = (body.get("status") or "firing").upper()
-    status_emoji = "🚨" if status == "FIRING" else "✅"
-    common_labels = body.get("commonLabels") or {}
-    common_annotations = body.get("commonAnnotations") or {}
-    alerts = body.get("alerts") or []
-
-    lines = [f"{status_emoji} <b>[PROMETHEUS ALERTMANAGER - {status}]</b>\n"]
-
-    if common_labels.get("alertname"):
-        lines.append(f"🔔 <b>Alerta:</b> <code>{html.escape(str(common_labels['alertname']))}</code>")
-    if common_labels.get("severity"):
-        lines.append(f"⚠️ <b>Severidad:</b> <code>{html.escape(str(common_labels['severity']))}</code>")
-
-    if alerts and isinstance(alerts, list):
-        lines.append(f"\n<b>Alertas activas ({len(alerts)}):</b>")
-        for i, a in enumerate(alerts, start=1):
-            if not isinstance(a, dict):
-                continue
-            labels = a.get("labels", {})
-            annotations = a.get("annotations", {})
-            aname = labels.get("alertname", f"Alert #{i}")
-            instance = labels.get("instance")
-            summary = annotations.get("summary") or annotations.get("description") or ""
-
-            alert_desc = f"• <b>{html.escape(str(aname))}</b>"
-            if instance:
-                alert_desc += f" (<i>{html.escape(str(instance))}</i>)"
-            if summary:
-                alert_desc += f": {html.escape(str(summary))}"
-            lines.append(alert_desc)
-    elif common_annotations.get("description") or common_annotations.get("summary"):
-        desc = common_annotations.get("description") or common_annotations.get("summary")
-        lines.append(f"\n📝 <b>Detalle:</b> {html.escape(str(desc))}")
-
-    formatted_message = "\n".join(lines).strip()
-    res = await send_telegram_notification(
-        target_user=target_user,
-        message=formatted_message,
-        parse_mode="HTML",
-    )
-
-    log_notification(
-        agent_id="alertmanager",
-        user_id=target_user,
-        chat_id=res.chat_id,
-        message=formatted_message,
-        parse_mode="HTML",
-        status=res.status,
-        telegram_message_id=res.telegram_message_id,
-        error=res.error,
-        chunks_total=res.chunks_total,
-        chunks_sent=res.chunks_sent,
-    )
-
-    await record_proactive_notification(
-        agent_id="alertmanager",
-        user_id=target_user,
-        message=formatted_message,
-        chat_id=res.chat_id,
-    )
-
-    return {
-        "status": "success" if res.success else "error",
-        "telegram_message_id": res.telegram_message_id,
-    }
 
 
 class CreateApprovalPlanPayload(BaseModel):

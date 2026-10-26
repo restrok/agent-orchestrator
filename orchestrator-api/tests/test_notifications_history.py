@@ -22,7 +22,7 @@ def test_notify_records_history_success():
         mock_post.return_value = mock_resp
         payload = {
             "user_id": "12345678",
-            "agent_id": "test_agent",
+            "service": "test_service",
             "message": "Test notification message",
         }
         response = client.post("/api/notify", json=payload)
@@ -31,17 +31,35 @@ def test_notify_records_history_success():
         assert response.json()["telegram_message_id"] == "999"
 
         # Check in notifications_history
-        history = get_notifications(agent_id="test_agent", limit=5)
+        history = get_notifications(agent_id="test_service", limit=5)
         assert len(history) >= 1
         record = history[0]
-        assert record["agent_id"] == "test_agent"
+        assert record["agent_id"] == "test_service"
         assert record["user_id"] == "12345678"
         assert record["status"] == "sent"
         assert record["telegram_message_id"] == "999"
-        assert "🔔 <b>Notificación (test_agent)</b>" in record["message"]
+        assert "🔔 <b>Notificación (test_service)</b>" in record["message"]
         assert record["parse_mode"] == "HTML"
         assert record["chunks_sent"] == 1
         assert record["chunks_total"] == 1
+
+
+def test_notify_backward_compatible_agent_id():
+    mock_resp = httpx.Response(200, json={"ok": True, "result": {"message_id": 998}})
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        payload = {
+            "user_id": "12345678",
+            "agent_id": "legacy_agent",
+            "message": "Legacy agent_id notification",
+        }
+        response = client.post("/api/notify", json=payload)
+        assert response.status_code == 200
+        assert response.json()["status"] == "success"
+
+        history = get_notifications(agent_id="legacy_agent", limit=5)
+        assert len(history) >= 1
+        assert history[0]["agent_id"] == "legacy_agent"
 
 
 def test_notify_raw_true_omits_prefix():
@@ -50,7 +68,7 @@ def test_notify_raw_true_omits_prefix():
         mock_post.return_value = mock_resp
         payload = {
             "user_id": "12345678",
-            "agent_id": "raw_agent",
+            "service": "raw_agent",
             "message": "Raw plain message without headers",
             "raw": True,
             "parse_mode": None,
@@ -73,7 +91,7 @@ def test_notify_failure_records_failed_status():
         mock_post.return_value = mock_resp
         payload = {
             "user_id": "12345678",
-            "agent_id": "failing_agent",
+            "service": "failing_agent",
             "message": "This will fail to send",
         }
         response = client.post("/api/notify", json=payload)
