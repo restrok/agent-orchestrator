@@ -15,6 +15,7 @@ def pytest_configure(config):
             tmp_dir = tmp_factory.mktemp("orchestrator_session_data")
         else:
             import tempfile
+
             tmp_dir = Path(tempfile.mkdtemp(prefix="orch_session_"))
         test_db = tmp_dir / "orchestrator_test.db"
         test_checkpoints = tmp_dir / "checkpoints_test.db"
@@ -47,8 +48,10 @@ def isolate_test_database(tmp_path_factory):
     app.db.init_db()
 
     import sys
+
     if "app.main" in sys.modules:
         import app.main
+
         app.main.DB_PATH = test_db
 
     yield test_db

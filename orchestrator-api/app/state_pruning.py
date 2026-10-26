@@ -53,11 +53,7 @@ async def prune_state_if_needed(graph: Any, config: dict[str, Any]) -> int:
                 while cut_idx < total_msgs and isinstance(messages[cut_idx], ToolMessage):
                     cut_idx += 1
 
-        removals = [
-            RemoveMessage(id=m.id)
-            for m in messages[:cut_idx]
-            if getattr(m, "id", None)
-        ]
+        removals = [RemoveMessage(id=m.id) for m in messages[:cut_idx] if getattr(m, "id", None)]
 
         if removals:
             await graph.aupdate_state(config, {"messages": removals})
