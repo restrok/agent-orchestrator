@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -112,37 +113,54 @@ def is_notification_only(batch: list[dict[str, Any]]) -> bool:
     return not any(msg.get("role") == "user" for msg in batch)
 
 
-def derive_space_id(batch: list[dict[str, Any]]) -> str:
-    """Deterministically derives the destination space_id for the batch.
+def _load_user_space_mapping() -> dict[str, str]:
+    """Loads optional user -> default space_id mapping from environment JSON.
 
-    Design & Criteria (Hybrid Spaces alignment with commit c8dad18):
-    1. User context:
-       - If user is 'mercedes', space is 'personal' (mercedes has no 'work' space access).
-    2. Intent context:
-       - Messages tagged with 'biometric_expert' (physiological metrics, Garmin sync, sleep)
-         pertain to personal biological state -> 'personal'.
-       - Messages tagged with 'antigravity_worker' or 'exocortex_brain' -> 'work'.
-       - If personal intents outnumber work intents -> 'personal'.
-    3. Default:
-       - Fallback to 'work', the canonical default space configured in Exocortex.
+    Format: JSON object, e.g. {"username": "personal", "corp_user": "work"}.
+    Env var: JANITOR_USER_SPACE_MAPPING
+    """
+    raw = os.getenv("JANITOR_USER_SPACE_MAPPING", "").strip()
+    if not raw:
+        return {}
+    try:
+        val = json.loads(raw)
+        if isinstance(val, dict):
+            return {str(k).lower(): str(v) for k, v in val.items()}
+    except Exception as e:
+        logger.warning(f"Failed to parse JANITOR_USER_SPACE_MAPPING from environment: {e}")
+    return {}
+
+
+def derive_space_id(batch: list[dict[str, Any]]) -> str:
+    """Deterministically derives the destination space_id for Telegram messages.
+
+    Design & Criteria:
+    1. Default: 'personal' for Telegram messages, as Telegram is the user's personal
+       communication channel. Empty batches also default to 'personal'.
+    2. Explicit Work Intents:
+       Returns 'work' ONLY if explicit work intents ('antigravity_worker',
+       'exocortex_brain', 'work') strictly outnumber personal intents
+       ('biometric_expert', 'personal').
+    3. User overrides:
+       Configurable via JANITOR_USER_SPACE_MAPPING env var (JSON mapping user_id -> space_id)
+       without hardcoding user names in code.
     """
     if not batch:
-        return "work"
+        return "personal"
 
     user_id = str(batch[0].get("user_id") or "").lower()
-    if user_id == "mercedes":
-        return "personal"
+    user_mapping = _load_user_space_mapping()
+    if user_id in user_mapping:
+        return user_mapping[user_id]
 
     intents = [msg.get("intent") for msg in batch if msg.get("intent")]
     if intents:
+        work_count = sum(1 for i in intents if i in ("antigravity_worker", "exocortex_brain", "work"))
         personal_count = sum(1 for i in intents if i in ("biometric_expert", "personal"))
-        work_count = sum(
-            1 for i in intents if i in ("antigravity_worker", "exocortex_brain", "work")
-        )
-        if personal_count > work_count:
-            return "personal"
+        if work_count > personal_count:
+            return "work"
 
-    return "work"
+    return "personal"
 
 
 def build_payload(batch: list[dict[str, Any]]) -> dict[str, Any]:
@@ -204,11 +222,7 @@ def is_mcp_success(response: Any) -> tuple[bool, str]:
     if isinstance(response, str):
         trimmed = response.strip()
         # Handle string error messages from _invoke_mcp_tool (e.g. timeouts, HTTP errors)
-        if (
-            trimmed.startswith("Error")
-            or trimmed.startswith("Exocortex MCP")
-            or "timed out" in trimmed.lower()
-        ):
+        if trimmed.startswith("Error") or trimmed.startswith("Exocortex MCP") or "timed out" in trimmed.lower():
             # Check if it happens to be valid JSON with status: ok
             try:
                 parsed = json.loads(trimmed)
@@ -331,26 +345,41 @@ async def run_janitor_cycle(
     idle_minutes: int = 30,
     volume_threshold: int = 20,
     mcp_invoker: Callable[..., Any] | None = None,
-    get_pending_fn: Callable[[], list[dict[str, Any]]] | None = None,
+    get_pending_fn: Callable[..., list[dict[str, Any]]] | None = None,
     mark_ingested_fn: Callable[[list[int]], int] | None = None,
     mark_skipped_fn: Callable[[list[int]], int] | None = None,
     get_lock_fn: Callable[[str], asyncio.Lock] | None = None,
+    lock_timeout: float | None = None,
 ) -> dict[str, Any]:
     """Executes a full cycle of the memory janitor across all pending threads.
 
-    - Groups pending rows by thread_id.
+    - Discovers pending threads.
+    - Uses per-thread asyncio.Lock with timeout (JANITOR_LOCK_TIMEOUT_SECONDS)
+      to prevent race conditions with concurrent chat turns or cycles.
+    - Re-reads pending messages INSIDE the lock to guarantee freshness and prevent double ingestion.
     - Evaluates `should_process` (or forces if `force=True`).
-    - Uses per-thread asyncio.Lock if provided to prevent race conditions
-      with concurrent chat turns on the same thread.
     - Collects cycle statistics and errors without interrupting execution.
     """
     if get_pending_fn is None:
-        def _default_get_pending() -> list[dict[str, Any]]:
-            return get_pending_for_ingest(limit=1000)
+
+        def _default_get_pending(t_id: str | None = None) -> list[dict[str, Any]]:
+            return get_pending_for_ingest(limit=1000, thread_id=t_id)
 
         get_pending_fn = _default_get_pending
 
-    pending_messages = get_pending_fn()
+    def _fetch_thread_pending(t_id: str) -> list[dict[str, Any]]:
+        try:
+            return get_pending_fn(thread_id=t_id)  # type: ignore
+        except TypeError:
+            try:
+                return get_pending_fn(t_id)  # type: ignore
+            except TypeError:
+                all_msgs = get_pending_fn()  # type: ignore
+                return [
+                    m for m in all_msgs if str(m.get("thread_id")) == str(t_id) and m.get("ingested_to_brain", 0) == 0
+                ]
+
+    pending_messages = get_pending_fn() if callable(get_pending_fn) else []
     batches = get_pending_batches(pending_messages)
 
     summary: dict[str, Any] = {
@@ -367,9 +396,13 @@ async def run_janitor_cycle(
     if not batches:
         return summary
 
-    for thread_id, batch in batches.items():
+    timeout_seconds = (
+        lock_timeout if lock_timeout is not None else float(os.getenv("JANITOR_LOCK_TIMEOUT_SECONDS", "5.0"))
+    )
+
+    for thread_id, candidate_batch in batches.items():
         if not should_process(
-            batch,
+            candidate_batch,
             now=now,
             idle_minutes=idle_minutes,
             volume_threshold=volume_threshold,
@@ -377,24 +410,49 @@ async def run_janitor_cycle(
         ):
             continue
 
-        try:
-            if get_lock_fn is not None:
-                async with get_lock_fn(str(thread_id)):
-                    res = await process_batch(
-                        thread_id=thread_id,
-                        batch=batch,
-                        mcp_invoker=mcp_invoker,
-                        mark_ingested_fn=mark_ingested_fn,
-                        mark_skipped_fn=mark_skipped_fn,
-                    )
-            else:
-                res = await process_batch(
-                    thread_id=thread_id,
-                    batch=batch,
-                    mcp_invoker=mcp_invoker,
-                    mark_ingested_fn=mark_ingested_fn,
-                    mark_skipped_fn=mark_skipped_fn,
+        lock = get_lock_fn(str(thread_id)) if get_lock_fn is not None else None
+        if lock is not None:
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=timeout_seconds)
+            except asyncio.TimeoutError:
+                logger.info(
+                    f"🧹 Lock acquisition timed out ({timeout_seconds}s) for thread '{thread_id}'. "
+                    f"Thread is currently active; skipping this cycle."
                 )
+                summary["details"].append(
+                    {
+                        "thread_id": thread_id,
+                        "status": "skipped_locked",
+                        "reason": f"lock_acquisition_timeout_{timeout_seconds}s",
+                    }
+                )
+                continue
+
+        try:
+            # Re-read pending batch INSIDE the acquired lock
+            fresh_batch = _fetch_thread_pending(str(thread_id))
+            fresh_batch.sort(key=lambda m: m["id"])
+
+            if not fresh_batch:
+                logger.info(f"🧹 Thread '{thread_id}' has no pending messages after acquiring lock. Skipping.")
+                continue
+
+            if not should_process(
+                fresh_batch,
+                now=now,
+                idle_minutes=idle_minutes,
+                volume_threshold=volume_threshold,
+                force=force,
+            ):
+                continue
+
+            res = await process_batch(
+                thread_id=thread_id,
+                batch=fresh_batch,
+                mcp_invoker=mcp_invoker,
+                mark_ingested_fn=mark_ingested_fn,
+                mark_skipped_fn=mark_skipped_fn,
+            )
 
             summary["details"].append(res)
             if res["status"] == "ingested":
@@ -409,6 +467,9 @@ async def run_janitor_cycle(
         except Exception as e:
             logger.error(f"Unexpected error processing batch for thread '{thread_id}': {e}", exc_info=True)
             summary["errors"].append({"thread_id": thread_id, "error": str(e)})
+        finally:
+            if lock is not None:
+                lock.release()
 
     if summary["errors"] and summary["processed_threads"] == 0:
         summary["status"] = "partial_or_error"

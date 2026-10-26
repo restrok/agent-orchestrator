@@ -1,5 +1,4 @@
 import asyncio
-import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,7 +21,7 @@ def setup_database():
 
 
 def test_insert_and_get_chat_messages():
-    thread_id = f"test_thread_{uuid.uuid4().hex[:8]}"
+    thread_id = "test_thread_123"
     user_id = "test_user_456"
 
     # Insert user message
@@ -63,7 +62,7 @@ def test_insert_and_get_chat_messages():
 
 
 def test_pending_ingest_and_mark_ingested():
-    thread_id = f"test_thread_ingest_{uuid.uuid4().hex[:8]}"
+    thread_id = "test_thread_ingest"
     user_id = "test_user_ingest"
 
     msg_id = insert_chat_message(

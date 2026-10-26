@@ -20,11 +20,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 try:
     from db import (
-        CHECKPOINTS_DB_PATH,
         complete_background_worker,
         create_approval_plan,
         get_approval_plan,
         get_chat_messages,
+        get_checkpoints_db_path,
+        get_db_path,
         get_notification_stats,
         get_notifications,
         get_scheduled_task_by_job_id,
@@ -47,11 +48,12 @@ try:
     from state_pruning import prune_state_if_needed
 except ImportError:
     from app.db import (
-        CHECKPOINTS_DB_PATH,
         complete_background_worker,
         create_approval_plan,
         get_approval_plan,
         get_chat_messages,
+        get_checkpoints_db_path,
+        get_db_path,
         get_notification_stats,
         get_notifications,
         get_scheduled_task_by_job_id,
@@ -232,7 +234,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 model_name = os.getenv("LLM_MODEL", "gemini-2.5-flash")
 
 # --- Scheduler Setup ---
-DB_PATH = Path(__file__).parent / "data" / "orchestrator.db"
+DB_PATH = get_db_path()
 jobstores = {"default": SQLAlchemyJobStore(url=f"sqlite:///{DB_PATH.resolve()}")}
 scheduler = AsyncIOScheduler(jobstores=jobstores, timezone="America/Argentina/Buenos_Aires")
 
@@ -1675,8 +1677,9 @@ async def lifespan(app: FastAPI):
     janitor_task = asyncio.create_task(janitor_loop(janitor_interval_minutes))
 
     # Persistent Checkpointer setup (AsyncSqliteSaver + WAL)
-    CHECKPOINTS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    checkpoints_conn = await aiosqlite.connect(str(CHECKPOINTS_DB_PATH))
+    checkpoints_path = get_checkpoints_db_path()
+    checkpoints_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoints_conn = await aiosqlite.connect(str(checkpoints_path))
     await checkpoints_conn.execute("PRAGMA journal_mode=WAL;")
     await checkpoints_conn.execute("PRAGMA busy_timeout=5000;")
     await checkpoints_conn.commit()

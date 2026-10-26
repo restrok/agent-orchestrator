@@ -1,7 +1,9 @@
 """Unit tests for the memory_janitor module."""
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -40,38 +42,25 @@ def test_should_process_triggers():
 
     # 1. Idle condition met (> 30 min ago)
     t_35_min_ago = (now_utc - timedelta(minutes=35)).isoformat()
-    batch_idle_met = [
-        {"id": 1, "created_at": t_35_min_ago, "role": "user", "thread_id": "t1"}
-    ]
+    batch_idle_met = [{"id": 1, "created_at": t_35_min_ago, "role": "user", "thread_id": "t1"}]
     assert should_process(batch_idle_met, now=now_utc, idle_minutes=30, volume_threshold=20) is True
 
     # 2. Idle NOT met (< 30 min ago, < 20 msgs)
     t_10_min_ago = (now_utc - timedelta(minutes=10)).isoformat()
-    batch_not_idle = [
-        {"id": 1, "created_at": t_10_min_ago, "role": "user", "thread_id": "t1"}
-    ]
+    batch_not_idle = [{"id": 1, "created_at": t_10_min_ago, "role": "user", "thread_id": "t1"}]
     assert should_process(batch_not_idle, now=now_utc, idle_minutes=30, volume_threshold=20) is False
 
     # 3. Volume met (>= 20 msgs even if only 1 minute ago)
     t_1_min_ago = (now_utc - timedelta(minutes=1)).isoformat()
-    batch_volume_met = [
-        {"id": i, "created_at": t_1_min_ago, "role": "user", "thread_id": "t1"}
-        for i in range(20)
-    ]
+    batch_volume_met = [{"id": i, "created_at": t_1_min_ago, "role": "user", "thread_id": "t1"} for i in range(20)]
     assert should_process(batch_volume_met, now=now_utc, idle_minutes=30, volume_threshold=20) is True
 
     # 4. Both idle and volume met
-    batch_both_met = [
-        {"id": i, "created_at": t_35_min_ago, "role": "user", "thread_id": "t1"}
-        for i in range(25)
-    ]
+    batch_both_met = [{"id": i, "created_at": t_35_min_ago, "role": "user", "thread_id": "t1"} for i in range(25)]
     assert should_process(batch_both_met, now=now_utc, idle_minutes=30, volume_threshold=20) is True
 
     # 5. Neither met
-    batch_neither = [
-        {"id": i, "created_at": t_10_min_ago, "role": "user", "thread_id": "t1"}
-        for i in range(15)
-    ]
+    batch_neither = [{"id": i, "created_at": t_10_min_ago, "role": "user", "thread_id": "t1"} for i in range(15)]
     assert should_process(batch_neither, now=now_utc, idle_minutes=30, volume_threshold=20) is False
 
     # 6. Force = True ignores timer and volume
@@ -186,29 +175,26 @@ def test_build_payload_deterministic_id_and_transcript():
 
 
 def test_derive_space_id_hybrid():
-    # User mercedes -> always personal
-    batch_mercedes = [
-        {"id": 1, "user_id": "mercedes", "intent": "general_chat", "role": "user"}
-    ]
-    assert derive_space_id(batch_mercedes) == "personal"
+    # 1. Empty batch -> personal
+    assert derive_space_id([]) == "personal"
 
-    # Biometric intent -> personal
-    batch_biometric = [
-        {"id": 1, "user_id": "fsirio", "intent": "biometric_expert", "role": "user"}
-    ]
+    # 2. Chat without intent -> personal
+    batch_no_intent = [{"id": 1, "user_id": "fsirio", "intent": None, "role": "user"}]
+    assert derive_space_id(batch_no_intent) == "personal"
+
+    # 3. Chat with biometric intent -> personal
+    batch_biometric = [{"id": 1, "user_id": "fsirio", "intent": "biometric_expert", "role": "user"}]
     assert derive_space_id(batch_biometric) == "personal"
 
-    # Worker / brain intent -> work
-    batch_work = [
-        {"id": 1, "user_id": "fsirio", "intent": "antigravity_worker", "role": "user"}
-    ]
+    # 4. Chat with antigravity intent -> work
+    batch_work = [{"id": 1, "user_id": "fsirio", "intent": "antigravity_worker", "role": "user"}]
     assert derive_space_id(batch_work) == "work"
 
-    # Default -> work
-    batch_default = [
-        {"id": 1, "user_id": "fsirio", "intent": None, "role": "user"}
-    ]
-    assert derive_space_id(batch_default) == "work"
+    # 5. User override via configuration mapping
+    batch_configured_user = [{"id": 1, "user_id": "custom_user", "intent": "antigravity_worker", "role": "user"}]
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setenv("JANITOR_USER_SPACE_MAPPING", '{"custom_user": "personal"}')
+        assert derive_space_id(batch_configured_user) == "personal"
 
 
 @pytest.mark.asyncio
@@ -219,7 +205,14 @@ async def test_process_batch_atomicity_on_mcp_failure():
     mock_mark_skipped = MagicMock()
 
     batch = [
-        {"id": 1, "thread_id": "t1", "user_id": "u1", "role": "user", "content": "hi", "created_at": "2026-10-26T00:00:00+00:00"}
+        {
+            "id": 1,
+            "thread_id": "t1",
+            "user_id": "u1",
+            "role": "user",
+            "content": "hi",
+            "created_at": "2026-10-26T00:00:00+00:00",
+        }
     ]
 
     res = await process_batch(
@@ -244,7 +237,14 @@ async def test_process_batch_atomicity_on_mcp_exception():
     mock_mark_skipped = MagicMock()
 
     batch = [
-        {"id": 1, "thread_id": "t1", "user_id": "u1", "role": "user", "content": "hi", "created_at": "2026-10-26T00:00:00+00:00"}
+        {
+            "id": 1,
+            "thread_id": "t1",
+            "user_id": "u1",
+            "role": "user",
+            "content": "hi",
+            "created_at": "2026-10-26T00:00:00+00:00",
+        }
     ]
 
     res = await process_batch(
@@ -263,19 +263,35 @@ async def test_process_batch_atomicity_on_mcp_exception():
 @pytest.mark.asyncio
 async def test_process_batch_success_marks_ingested():
     """Verify that upon successful MCP response, rows are marked with ingested_to_brain = 1."""
-    mcp_ok_json = json.dumps({
-        "schema_version": 2,
-        "status": "ok",
-        "method": "ingest_antigravity_transcript",
-        "data": {"records_processed": 1, "notes_created": ["note_123"]},
-    })
+    mcp_ok_json = json.dumps(
+        {
+            "schema_version": 2,
+            "status": "ok",
+            "method": "ingest_antigravity_transcript",
+            "data": {"records_processed": 1, "notes_created": ["note_123"]},
+        }
+    )
     mock_mcp = AsyncMock(return_value=mcp_ok_json)
     mock_mark_ingested = MagicMock(return_value=2)
     mock_mark_skipped = MagicMock()
 
     batch = [
-        {"id": 10, "thread_id": "t1", "user_id": "u1", "role": "user", "content": "msg 1", "created_at": "2026-10-26T00:00:00+00:00"},
-        {"id": 11, "thread_id": "t1", "user_id": "u1", "role": "assistant", "content": "msg 2", "created_at": "2026-10-26T00:01:00+00:00"},
+        {
+            "id": 10,
+            "thread_id": "t1",
+            "user_id": "u1",
+            "role": "user",
+            "content": "msg 1",
+            "created_at": "2026-10-26T00:00:00+00:00",
+        },
+        {
+            "id": 11,
+            "thread_id": "t1",
+            "user_id": "u1",
+            "role": "assistant",
+            "content": "msg 2",
+            "created_at": "2026-10-26T00:01:00+00:00",
+        },
     ]
 
     res = await process_batch(
@@ -301,9 +317,33 @@ async def test_process_batch_notification_only_skips_mcp():
     mock_mark_skipped = MagicMock(return_value=3)
 
     batch = [
-        {"id": 1, "thread_id": "notif_thread", "user_id": "u1", "role": "assistant", "source": "notification", "content": "Notif 1", "created_at": "2026-10-26T00:00:00+00:00"},
-        {"id": 2, "thread_id": "notif_thread", "user_id": "u1", "role": "assistant", "source": "notification", "content": "Notif 2", "created_at": "2026-10-26T00:01:00+00:00"},
-        {"id": 3, "thread_id": "notif_thread", "user_id": "u1", "role": "assistant", "source": "notification", "content": "Notif 3", "created_at": "2026-10-26T00:02:00+00:00"},
+        {
+            "id": 1,
+            "thread_id": "notif_thread",
+            "user_id": "u1",
+            "role": "assistant",
+            "source": "notification",
+            "content": "Notif 1",
+            "created_at": "2026-10-26T00:00:00+00:00",
+        },
+        {
+            "id": 2,
+            "thread_id": "notif_thread",
+            "user_id": "u1",
+            "role": "assistant",
+            "source": "notification",
+            "content": "Notif 2",
+            "created_at": "2026-10-26T00:01:00+00:00",
+        },
+        {
+            "id": 3,
+            "thread_id": "notif_thread",
+            "user_id": "u1",
+            "role": "assistant",
+            "source": "notification",
+            "content": "Notif 3",
+            "created_at": "2026-10-26T00:02:00+00:00",
+        },
     ]
 
     res = await process_batch(
@@ -330,11 +370,33 @@ async def test_run_janitor_cycle_orchestration():
 
     pending_messages = [
         # Thread 1: eligible (old user message) -> should ingest
-        {"id": 1, "thread_id": "thread_1", "user_id": "fsirio", "role": "user", "content": "Hello", "created_at": t_old},
+        {
+            "id": 1,
+            "thread_id": "thread_1",
+            "user_id": "fsirio",
+            "role": "user",
+            "content": "Hello",
+            "created_at": t_old,
+        },
         # Thread 2: not eligible (recent, only 1 message) -> should be skipped by should_process
-        {"id": 2, "thread_id": "thread_2", "user_id": "fsirio", "role": "user", "content": "Recent", "created_at": t_new},
+        {
+            "id": 2,
+            "thread_id": "thread_2",
+            "user_id": "fsirio",
+            "role": "user",
+            "content": "Recent",
+            "created_at": t_new,
+        },
         # Thread 3: eligible by idle, notification-only -> should mark skipped (2)
-        {"id": 3, "thread_id": "thread_3", "user_id": "fsirio", "role": "assistant", "source": "notification", "content": "Alert", "created_at": t_old},
+        {
+            "id": 3,
+            "thread_id": "thread_3",
+            "user_id": "fsirio",
+            "role": "assistant",
+            "source": "notification",
+            "content": "Alert",
+            "created_at": t_old,
+        },
     ]
 
     mock_mcp = AsyncMock(return_value=json.dumps({"status": "ok"}))
@@ -408,3 +470,126 @@ def test_post_flush_endpoint():
             get_lock_fn=ANY,
         )
 
+
+@pytest.mark.asyncio
+async def test_concurrent_cycles_double_ingestion_race():
+    """Regression test (FIX 2): Two concurrent janitor cycles on the same thread invoke MCP exactly ONCE."""
+    thread_lock = asyncio.Lock()
+
+    def get_lock(_t_id: str) -> asyncio.Lock:
+        return thread_lock
+
+    stored_messages = [
+        {
+            "id": 1,
+            "thread_id": "tg_shared_thread",
+            "user_id": "user1",
+            "role": "user",
+            "content": "Hello",
+            "created_at": "2026-10-26T00:00:00+00:00",
+            "ingested_to_brain": 0,
+        },
+        {
+            "id": 2,
+            "thread_id": "tg_shared_thread",
+            "user_id": "user1",
+            "role": "assistant",
+            "content": "World",
+            "created_at": "2026-10-26T00:01:00+00:00",
+            "ingested_to_brain": 0,
+        },
+    ]
+
+    def mock_get_pending(thread_id: str | None = None) -> list[dict[str, Any]]:
+        return [
+            dict(m)
+            for m in stored_messages
+            if m["ingested_to_brain"] == 0 and (thread_id is None or str(m["thread_id"]) == str(thread_id))
+        ]
+
+    def mock_mark_ingested(ids: list[int]) -> int:
+        updated = 0
+        for m in stored_messages:
+            if m["id"] in ids and m["ingested_to_brain"] == 0:
+                m["ingested_to_brain"] = 1
+                updated += 1
+        return updated
+
+    mock_mcp = AsyncMock()
+
+    async def slow_mcp(_tool_name: str, _payload: dict):
+        await asyncio.sleep(0.05)
+        return json.dumps({"status": "ok"})
+
+    mock_mcp.side_effect = slow_mcp
+
+    task1 = asyncio.create_task(
+        run_janitor_cycle(
+            force=True,
+            mcp_invoker=mock_mcp,
+            get_pending_fn=mock_get_pending,
+            mark_ingested_fn=mock_mark_ingested,
+            get_lock_fn=get_lock,
+        )
+    )
+    task2 = asyncio.create_task(
+        run_janitor_cycle(
+            force=True,
+            mcp_invoker=mock_mcp,
+            get_pending_fn=mock_get_pending,
+            mark_ingested_fn=mock_mark_ingested,
+            get_lock_fn=get_lock,
+        )
+    )
+
+    res1, res2 = await asyncio.gather(task1, task2)
+
+    total_ingested = res1["ingested_messages"] + res2["ingested_messages"]
+    assert total_ingested == 2
+    assert mock_mcp.call_count == 1
+    assert len(res1["errors"]) == 0
+    assert len(res2["errors"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_lock_timeout_skips_thread():
+    """Regression test (FIX 3): If lock acquisition times out, skip thread with status 'skipped_locked' without error."""
+    thread_lock = asyncio.Lock()
+    await thread_lock.acquire()
+
+    batch = [
+        {
+            "id": 1,
+            "thread_id": "locked_thread",
+            "user_id": "user1",
+            "role": "user",
+            "content": "Hello",
+            "created_at": "2026-10-26T00:00:00+00:00",
+            "ingested_to_brain": 0,
+        }
+    ]
+
+    mock_mcp = AsyncMock()
+
+    try:
+        summary = await run_janitor_cycle(
+            force=True,
+            mcp_invoker=mock_mcp,
+            get_pending_fn=lambda **_kwargs: list(batch),
+            get_lock_fn=lambda _t_id: thread_lock,
+            lock_timeout=0.05,
+        )
+
+        assert summary["status"] == "ok"
+        assert len(summary["errors"]) == 0
+        assert summary["processed_threads"] == 0
+        assert summary["ingested_messages"] == 0
+
+        assert len(summary["details"]) == 1
+        detail = summary["details"][0]
+        assert detail["thread_id"] == "locked_thread"
+        assert detail["status"] == "skipped_locked"
+
+        mock_mcp.assert_not_called()
+    finally:
+        thread_lock.release()
