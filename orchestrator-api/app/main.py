@@ -1635,11 +1635,19 @@ def get_graph() -> Any:
     """Returns the compiled LangGraph instance.
 
     If accessed before lifespan initialization (e.g. in test suite),
-    falls back to a temporary MemorySaver instance.
+    falls back to a temporary MemorySaver instance when testing.
+    In production, raises RuntimeError to prevent silent persistence loss.
     """
     global graph
     if graph is not None:
         return graph
+    is_testing = os.getenv("ORCHESTRATOR_TESTING", "").strip().lower() in ("true", "1", "yes") or os.getenv(
+        "TESTING", ""
+    ).strip().lower() in ("true", "1", "yes")
+    if not is_testing:
+        raise RuntimeError(
+            "Graph accessed before lifespan initialization — refusing to fall back to MemorySaver in production"
+        )
     logger.warning("Graph accessed before lifespan initialization; compiling fallback MemorySaver")
     graph = workflow.compile(checkpointer=MemorySaver())
     return graph

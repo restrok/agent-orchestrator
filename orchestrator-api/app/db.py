@@ -61,9 +61,17 @@ CANONICAL_USERS = _load_env_json("CANONICAL_USER_MAPPING")
 CANONICAL_ALIASES = _load_env_json("CANONICAL_USER_ALIASES")
 
 
+def get_db_connection() -> sqlite3.Connection:
+    """Returns an open SQLite connection to orchestrator.db configured with WAL mode and busy timeout."""
+    conn = sqlite3.connect(str(get_db_path()))
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    return conn
+
+
 def init_db():
     """Initializes SQLite database and tables."""
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     # Users table
@@ -184,7 +192,7 @@ def init_db():
 
 def get_user_mapping():
     """Returns current {telegram_id: platform_user_id} mapping."""
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT telegram_id, platform_user_id FROM users")
     mapping = {row[0]: row[1] for row in cursor.fetchall()}
@@ -201,7 +209,7 @@ def register_user(telegram_id: str, platform_user_id: str):
     elif platform_user_id.lower() in CANONICAL_ALIASES:
         platform_user_id = CANONICAL_ALIASES[platform_user_id.lower()]
 
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -223,7 +231,7 @@ def get_platform_id(telegram_id: str):
     """Retrieves platform_user_id for a given telegram_id."""
     if telegram_id in CANONICAL_USERS:
         return CANONICAL_USERS[telegram_id]
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT platform_user_id FROM users WHERE telegram_id = ?", (telegram_id,))
     row = cursor.fetchone()
@@ -237,7 +245,7 @@ def get_telegram_id(platform_user_id: str):
     for tid, pid in CANONICAL_USERS.items():
         if pid == canonical_target:
             return tid
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT telegram_id FROM users WHERE platform_user_id = ?", (platform_user_id,))
     row = cursor.fetchone()
@@ -257,7 +265,7 @@ def create_approval_plan(
     task: str,
     target_project: str,
 ):
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -271,7 +279,7 @@ def create_approval_plan(
 
 
 def get_approval_plan(plan_id: str) -> dict[str, Any] | None:
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM approval_plans WHERE id = ?", (plan_id,))
@@ -281,7 +289,7 @@ def get_approval_plan(plan_id: str) -> dict[str, Any] | None:
 
 
 def update_approval_plan_status(plan_id: str, status: str):
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE approval_plans SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?", (status, plan_id)
@@ -294,7 +302,7 @@ def update_approval_plan_status(plan_id: str, status: str):
 
 
 def register_background_worker(worker_id: str, user_id: str, chat_id: str, task: str, target_project: str):
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -308,7 +316,7 @@ def register_background_worker(worker_id: str, user_id: str, chat_id: str, task:
 
 
 def update_background_worker_progress(worker_id: str, last_status_msg: str):
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE background_workers SET last_status_msg = ? WHERE id = ?", (last_status_msg, worker_id))
     conn.commit()
@@ -316,7 +324,7 @@ def update_background_worker_progress(worker_id: str, last_status_msg: str):
 
 
 def complete_background_worker(worker_id: str, status: str, result: str):
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -344,7 +352,7 @@ def register_scheduled_task(
     payload: dict,
     trigger_time: str,
 ):
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -358,7 +366,7 @@ def register_scheduled_task(
 
 
 def list_active_scheduled_tasks() -> list[dict[str, Any]]:
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='apscheduler_jobs'")
@@ -389,7 +397,7 @@ def list_active_scheduled_tasks() -> list[dict[str, Any]]:
 
 
 def get_scheduled_task_by_job_id(job_id: str) -> dict[str, Any] | None:
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM scheduled_tasks WHERE job_id = ?", (job_id,))
@@ -399,7 +407,7 @@ def get_scheduled_task_by_job_id(job_id: str) -> dict[str, Any] | None:
 
 
 def update_scheduled_task_status(job_id: str, status: str):
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE scheduled_tasks SET status = ? WHERE job_id = ?", (status, job_id))
     conn.commit()
@@ -425,7 +433,7 @@ def log_notification(
     """Inserts a notification record into notifications_history and returns its id."""
     if not created_at:
         created_at = datetime.now(timezone.utc).isoformat()
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -461,7 +469,7 @@ def get_notifications(
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     """Retrieves notifications history filtered by agent_id and/or since ISO date."""
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -490,7 +498,7 @@ def get_notifications(
 
 def get_notification_stats(since: str | None = None) -> dict[str, Any]:
     """Retrieves notification counts grouped by agent_id and status."""
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     base_where = ""
@@ -527,7 +535,7 @@ def get_notification_stats(since: str | None = None) -> dict[str, Any]:
 
 def get_system_setting(key: str, default: str | None = None) -> str | None:
     """Retrieves a persistent system setting by key from SQLite."""
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
@@ -541,7 +549,7 @@ def get_system_setting(key: str, default: str | None = None) -> str | None:
 
 def set_system_setting(key: str, value: str) -> None:
     """Persists or updates a system setting in SQLite."""
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -571,7 +579,7 @@ def insert_chat_message(
     source: str = "chat",
 ) -> int:
     """Inserts a new chat message into chat_messages table and returns its id."""
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     created_at = datetime.now(timezone.utc).isoformat()
     cursor.execute(
@@ -595,7 +603,7 @@ def get_chat_messages(
     ingested_to_brain: int | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieves chat messages filtered by thread_id, source, and/or ingested_to_brain."""
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -627,7 +635,7 @@ def get_chat_messages(
 
 def get_pending_for_ingest(limit: int = 500, thread_id: str | None = None) -> list[dict[str, Any]]:
     """Retrieves messages pending to be ingested into the brain knowledge base."""
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     if thread_id is not None:
@@ -649,7 +657,7 @@ def mark_ingested(message_ids: list[int]) -> int:
     """Marks a list of message IDs as ingested (ingested_to_brain = 1)."""
     if not message_ids:
         return 0
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     placeholders = ",".join("?" for _ in message_ids)
     cursor.execute(
@@ -668,7 +676,7 @@ def mark_skipped(message_ids: list[int]) -> int:
     """Marks a list of message IDs as skipped (ingested_to_brain = 2)."""
     if not message_ids:
         return 0
-    conn = sqlite3.connect(get_db_path())
+    conn = get_db_connection()
     cursor = conn.cursor()
     placeholders = ",".join("?" for _ in message_ids)
     cursor.execute(

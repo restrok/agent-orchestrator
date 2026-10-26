@@ -171,3 +171,37 @@ async def test_pruning_safe_tool_cut():
     removal_ids = [r.id for r in removals]
     assert "id_14" in removal_ids
     assert "id_15" in removal_ids
+
+
+def test_db_connection_wal_and_busy_timeout():
+    from app.db import get_db_connection
+
+    conn = get_db_connection()
+    try:
+        journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+        busy_timeout = conn.execute("PRAGMA busy_timeout;").fetchone()[0]
+        assert journal_mode.lower() == "wal"
+        assert busy_timeout == 5000
+    finally:
+        conn.close()
+
+
+def test_get_graph_outside_lifespan_error_in_prod(monkeypatch):
+    import app.main
+
+    monkeypatch.setattr(app.main, "graph", None)
+    monkeypatch.delenv("ORCHESTRATOR_TESTING", raising=False)
+    monkeypatch.delenv("TESTING", raising=False)
+
+    with pytest.raises(RuntimeError, match="refusing to fall back to MemorySaver in production"):
+        app.main.get_graph()
+
+
+def test_get_graph_outside_lifespan_fallback_in_testing(monkeypatch):
+    import app.main
+
+    monkeypatch.setattr(app.main, "graph", None)
+    monkeypatch.setenv("ORCHESTRATOR_TESTING", "true")
+
+    g = app.main.get_graph()
+    assert g is not None
