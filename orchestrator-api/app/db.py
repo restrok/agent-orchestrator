@@ -624,3 +624,20 @@ def mark_ingested(message_ids: list[int]) -> int:
     conn.commit()
     conn.close()
     return updated
+
+
+def mark_skipped(message_ids: list[int]) -> int:
+    """Marks a list of message IDs as skipped (ingested_to_brain = 2)."""
+    if not message_ids:
+        return 0
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    placeholders = ",".join("?" for _ in message_ids)
+    cursor.execute(
+        f"UPDATE chat_messages SET ingested_to_brain = 2 WHERE id IN ({placeholders})",
+        message_ids,
+    )
+    updated = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return updated

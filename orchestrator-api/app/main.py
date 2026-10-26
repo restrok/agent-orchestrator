@@ -27,7 +27,6 @@ try:
         get_chat_messages,
         get_notification_stats,
         get_notifications,
-        get_pending_for_ingest,
         get_scheduled_task_by_job_id,
         get_system_setting,
         get_telegram_id,
@@ -36,7 +35,6 @@ try:
         insert_chat_message,
         list_active_scheduled_tasks,
         log_notification,
-        mark_ingested,
         register_background_worker,
         register_scheduled_task,
         register_user,
@@ -45,6 +43,7 @@ try:
         update_background_worker_progress,
         update_scheduled_task_status,
     )
+    from memory_janitor import run_janitor_cycle
     from state_pruning import prune_state_if_needed
 except ImportError:
     from app.db import (
@@ -55,7 +54,6 @@ except ImportError:
         get_chat_messages,
         get_notification_stats,
         get_notifications,
-        get_pending_for_ingest,
         get_scheduled_task_by_job_id,
         get_system_setting,
         get_telegram_id,
@@ -64,7 +62,6 @@ except ImportError:
         insert_chat_message,
         list_active_scheduled_tasks,
         log_notification,
-        mark_ingested,
         register_background_worker,
         register_scheduled_task,
         register_user,
@@ -73,6 +70,7 @@ except ImportError:
         update_background_worker_progress,
         update_scheduled_task_status,
     )
+    from app.memory_janitor import run_janitor_cycle
     from app.state_pruning import prune_state_if_needed
 
 from dotenv import load_dotenv
@@ -1645,12 +1643,36 @@ def get_graph() -> Any:
     return graph
 
 
+async def janitor_loop(interval_minutes: float = 12.0):
+    """Background task running periodic memory janitor cycles."""
+    logger.info(f"🧹 Memory janitor periodic loop started (interval={interval_minutes}m)")
+    interval_seconds = max(interval_minutes * 60.0, 10.0)
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            logger.info("🧹 Starting scheduled memory janitor cycle...")
+            summary = await run_janitor_cycle(
+                mcp_invoker=_invoke_mcp_tool,
+                get_lock_fn=get_thread_lock,
+            )
+            logger.info(f"🧹 Memory janitor cycle finished: {summary}")
+        except asyncio.CancelledError:
+            logger.info("🧹 Memory janitor task cancelled.")
+            raise
+        except Exception as e:
+            logger.error(f"❌ Error in periodic memory janitor cycle: {e}", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # APScheduler Startup
     scheduler.start()
     logger.info("⏰ APScheduler started with SQLite persistent jobstore.")
     heartbeat_task = asyncio.create_task(heartbeat_loop())
+
+    # Memory Janitor Startup
+    janitor_interval_minutes = parse_env_float("JANITOR_INTERVAL_MINUTES", 12.0)
+    janitor_task = asyncio.create_task(janitor_loop(janitor_interval_minutes))
 
     # Persistent Checkpointer setup (AsyncSqliteSaver + WAL)
     CHECKPOINTS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -1669,6 +1691,11 @@ async def lifespan(app: FastAPI):
     logger.info("🧠 LangGraph compiled with persistent AsyncSqliteSaver (WAL mode).")
 
     yield
+
+    janitor_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await janitor_task
+    logger.info("🧹 Memory janitor task shut down cleanly.")
 
     heartbeat_task.cancel()
     scheduler.shutdown()
@@ -1961,6 +1988,21 @@ async def list_messages_endpoint(
         source=clean_source,
         ingested_to_brain=ingested_to_brain,
     )
+
+
+@app.post("/api/messages/flush")
+async def flush_messages_endpoint():
+    """Manual flush endpoint to trigger memory janitor cycle immediately ignoring idle timer."""
+    logger.info("🧹 Manual memory flush requested via POST /api/messages/flush")
+    try:
+        return await run_janitor_cycle(
+            force=True,
+            mcp_invoker=_invoke_mcp_tool,
+            get_lock_fn=get_thread_lock,
+        )
+    except Exception as e:
+        logger.error(f"Error executing manual memory flush: {e}", exc_info=True)
+        return {"status": "error", "error": str(e)}
 
 
 @app.get("/api/notifications")
